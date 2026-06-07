@@ -1,26 +1,23 @@
 """
 LiDAR Survey Explorer
 =====================
-Streamlit app for visualising WingtraRay LiDAR surveys stored in R2.
+Password-protected Streamlit app for visualising WingtraRay LiDAR surveys.
 
-Repo structure:
-  lidar_app.py        ← this file (entry point)
-  lidar_r2.py
-  requirements.txt
-  assets/
-    wingtra_logo.png  ← copy from the multispectral repo
-  .streamlit/
-    secrets.toml
-  tools/
-    lidar_preprocess.py
-    lidar_diagnose.py
-    lidar_patch_meta.py
+Secrets required (.streamlit/secrets.toml):
+    app_password = "..."        ← access gate
+
+    [r2]
+    account_id = "..."
+    access_key = "..."          ← read-only token
+    secret_key = "..."
+    bucket     = "ptpn-bucket"
 
 Run with:
     streamlit run lidar_app.py
 """
 
 import os
+import hmac
 import base64
 import numpy as np
 import streamlit as st
@@ -29,8 +26,8 @@ import plotly.graph_objects as go
 
 from lidar_r2 import list_surveys, load_bundle, refresh_surveys, presigned_url
 
-APP_TITLE  = "LiDAR Survey Explorer"
-LOGO_PATH  = "assets/wingtra_logo.png"
+APP_TITLE = "LiDAR Survey Explorer"
+LOGO_PATH = "assets/wingtra_logo.png"
 
 # --------------------------------------------------------------------------- #
 #  Wingtra brand CSS
@@ -83,7 +80,7 @@ CSS = f"""
 """
 
 # --------------------------------------------------------------------------- #
-#  Branding helpers
+#  Branding
 # --------------------------------------------------------------------------- #
 def _logo_b64():
     if os.path.exists(LOGO_PATH):
@@ -96,15 +93,36 @@ def _logo_b64():
 
 def render_header(subtitle="Point cloud · Digital terrain model"):
     st.markdown(CSS, unsafe_allow_html=True)
-    b64 = _logo_b64()
+    b64   = _logo_b64()
     brand = (f'<img src="data:image/png;base64,{b64}" alt="Wingtra"/>' if b64
              else f'<span class="wingtra-wordmark">wingtra</span>')
-    sub = f'<div class="wingtra-subtitle">{subtitle}</div>' if subtitle else ""
+    sub   = f'<div class="wingtra-subtitle">{subtitle}</div>' if subtitle else ""
     st.markdown(
         f'<div class="wingtra-header">{brand}'
         f'<div><div class="wingtra-title">{APP_TITLE}</div>{sub}</div></div>',
         unsafe_allow_html=True,
     )
+
+
+# --------------------------------------------------------------------------- #
+#  Password gate  (same pattern as the multispectral app)
+# --------------------------------------------------------------------------- #
+def check_password():
+    """Returns True if the user has entered the correct password."""
+    if st.session_state.get("auth_ok"):
+        return True
+
+    render_header()
+    st.caption("Enter the access password to continue.")
+    pw = st.text_input("Password", type="password", key="pw_input")
+    if pw:
+        expected = st.secrets.get("app_password", "")
+        if expected and hmac.compare_digest(pw, expected):
+            st.session_state["auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -116,8 +134,9 @@ def _fmt_n(n):
     return str(n)
 
 def _layer_label(name):
-    return {"ground": "Ground (class 2)", "nonground": "Non-ground",
-            "points": "All points (unclassified)"}.get(name, name)
+    return {"ground":    "Ground (class 2)",
+            "nonground": "Non-ground",
+            "points":    "All points (unclassified)"}.get(name, name)
 
 
 # --------------------------------------------------------------------------- #
@@ -184,6 +203,24 @@ def render_dtm(bundle, vert_exag):
         st.info("No DTM available for this survey.")
         return
 
+    # ---- NaN / nodata handling ------------------------------------------ #
+    # GeoTIFFs often have nodata regions converted to NaN during preprocessing.
+    # Plotly Surface renders NaN cells as transparent holes (correct), but
+    # passes them straight through to the hover template where they appear as
+    # "NaN". Fix: build a separate hover array with NaN replaced by the minimum
+    # finite value — those cells are invisible holes so the fill is never shown.
+    finite_mask = np.isfinite(dtm)
+    if not finite_mask.any():
+        st.warning("DTM contains no valid elevation values — nodata may cover the entire grid.")
+        return
+
+    z_min_disp = float(np.min(dtm[finite_mask]))
+    z_max_disp = float(np.max(dtm[finite_mask]))
+
+    # Fill NaN for hover tooltip (invisible for hole cells)
+    dtm_hover = np.where(finite_mask, dtm, z_min_disp)
+
+    # ---- Coordinate conversion to local metres -------------------------- #
     bounds = dtm_meta["bounds_4326"]
     lat0   = (bounds["lat_min"] + bounds["lat_max"]) / 2
     lon0   = (bounds["lon_min"] + bounds["lon_max"]) / 2
@@ -195,24 +232,41 @@ def render_dtm(bundle, vert_exag):
     lats = np.linspace(bounds["lat_min"], bounds["lat_max"], nrows)
     x_m  = (lons - lon0) * m_lon
     y_m  = (lats - lat0) * m_lat
+
+    # z_pl retains NaN so Plotly renders nodata regions as holes
     z_pl = dtm * vert_exag
 
+    # ---- Aspect ratio --------------------------------------------------- #
     span_x = float(x_m.max() - x_m.min())
     span_y = float(y_m.max() - y_m.min())
-    span_z = float(dtm_meta["z_max"] - dtm_meta["z_min"]) * vert_exag
+    span_z = (z_max_disp - z_min_disp) * vert_exag
     ms     = max(span_x, span_y, span_z, 1)
 
-    tick_vals = np.linspace(dtm_meta["z_min"], dtm_meta["z_max"], 6)
+    # ---- Colorbar ticks from finite range ------------------------------- #
+    tick_vals = np.linspace(z_min_disp, z_max_disp, 6)
 
     fig = go.Figure(data=[go.Surface(
         z=z_pl, x=x_m, y=y_m,
         colorscale="Earth",
-        colorbar=dict(title="Elevation (m)", tickvals=tick_vals,
-                      ticktext=[f"{v:.0f}" for v in tick_vals],
-                      thickness=14, len=0.7),
-        hovertemplate="E: %{x:.0f} m<br>N: %{y:.0f} m<br>Z: %{customdata:.1f} m<extra></extra>",
-        customdata=dtm,
+        cmin=z_min_disp,
+        cmax=z_max_disp,
+        colorbar=dict(
+            title="Elevation (m)",
+            tickvals=tick_vals,
+            ticktext=[f"{v:.0f}" for v in tick_vals],
+            thickness=14, len=0.7,
+        ),
+        # customdata carries the true (non-exaggerated) elevation for the tooltip.
+        # NaN replaced above so the hover never shows "NaN".
+        customdata=dtm_hover,
+        hovertemplate=(
+            "E: %{x:.0f} m<br>"
+            "N: %{y:.0f} m<br>"
+            "Elevation: %{customdata:.1f} m"
+            "<extra></extra>"
+        ),
     )])
+
     fig.update_layout(
         scene=dict(
             xaxis=dict(title="Easting offset (m)"),
@@ -227,11 +281,12 @@ def render_dtm(bundle, vert_exag):
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    res = dtm_meta.get("src_resolution_m", "—")
+    # Stats — use finite-only range, not meta (which may be stale/NaN)
+    res  = dtm_meta.get("src_resolution_m", "—")
     cols = st.columns(4)
-    cols[0].metric("Min elevation", f"{dtm_meta['z_min']:.1f} m")
-    cols[1].metric("Max elevation", f"{dtm_meta['z_max']:.1f} m")
-    cols[2].metric("Relief",        f"{dtm_meta['z_max'] - dtm_meta['z_min']:.1f} m")
+    cols[0].metric("Min elevation", f"{z_min_disp:.1f} m")
+    cols[1].metric("Max elevation", f"{z_max_disp:.1f} m")
+    cols[2].metric("Relief",        f"{z_max_disp - z_min_disp:.1f} m")
     cols[3].metric("Source res.",   f"{res} m/px" if isinstance(res, (int, float)) else str(res))
 
     st.caption(
@@ -246,6 +301,10 @@ def render_dtm(bundle, vert_exag):
 # --------------------------------------------------------------------------- #
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
+
+    if not check_password():
+        st.stop()
+
     render_header()
 
     # ---- Sidebar --------------------------------------------------------- #
@@ -271,18 +330,37 @@ def main():
 
         meta = bundle["meta"]
 
+        # Point cloud controls
         st.header("Point cloud")
-        point_size = st.slider("Point size", 1, 6, 2)
+        point_size = st.slider(
+            "Point size", 1, 6, 2,
+            help=(
+                "Size of each rendered point in pixels. "
+                "Increase if the cloud looks sparse or hard to read; "
+                "decrease if it looks blocky or saturated. "
+                "Higher values also slow down rendering for large point counts."
+            ),
+        )
 
         visible_layers = {}
         for name in meta.get("layers", []):
             visible_layers[name] = st.checkbox(_layer_label(name), value=True)
 
+        # DTM controls (only when DTM is present)
         vert_exag = 1.0
         if bundle["dtm"] is not None:
             st.header("DTM surface")
-            vert_exag = st.slider("Vertical exaggeration", 0.5, 5.0, 1.0, step=0.5)
+            vert_exag = st.slider(
+                "Vertical exaggeration", 0.5, 5.0, 1.0, step=0.5,
+                help=(
+                    "Multiplies elevation values to amplify terrain relief. "
+                    "1.0 = true scale — horizontal and vertical axes match. "
+                    "Useful for relatively flat terrain where subtle slopes are "
+                    "hard to see at true scale. Try 2–3× for plantation surveys."
+                ),
+            )
 
+        # Info
         st.header("Info")
         st.markdown(
             f"**Mode:** {meta['mode'].capitalize()}  \n"
@@ -291,7 +369,7 @@ def main():
             f"**DTM:** {'Included' if meta.get('dtm_available') else 'Not available'}"
         )
 
-        # Downloads — presigned URLs (browser ↔ R2 directly)
+        # Downloads (presigned URLs — browser ↔ R2 directly)
         st.header("Downloads")
         raw_las_key = meta.get("raw_las_key")
         raw_dtm_key = meta.get("raw_dtm_key")
