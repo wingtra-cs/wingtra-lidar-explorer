@@ -3,14 +3,25 @@ LiDAR Survey Explorer
 =====================
 Streamlit app for visualising WingtraRay LiDAR surveys stored in R2.
 
-Tabs:
-  ☁ Point Cloud  — PyDeck PointCloudLayer (classified or unclassified)
-  ⛰ DTM Surface  — Plotly Surface from LiDAR360 GeoTIFF (if provided)
+Repo structure:
+  lidar_app.py        ← this file (entry point)
+  lidar_r2.py
+  requirements.txt
+  assets/
+    wingtra_logo.png  ← copy from the multispectral repo
+  .streamlit/
+    secrets.toml
+  tools/
+    lidar_preprocess.py
+    lidar_diagnose.py
+    lidar_patch_meta.py
 
 Run with:
     streamlit run lidar_app.py
 """
 
+import os
+import base64
 import numpy as np
 import streamlit as st
 import pydeck as pdk
@@ -18,7 +29,8 @@ import plotly.graph_objects as go
 
 from lidar_r2 import list_surveys, load_bundle, refresh_surveys, presigned_url
 
-APP_TITLE = "LiDAR Survey Explorer"
+APP_TITLE  = "LiDAR Survey Explorer"
+LOGO_PATH  = "assets/wingtra_logo.png"
 
 # --------------------------------------------------------------------------- #
 #  Wingtra brand CSS
@@ -50,8 +62,10 @@ CSS = f"""
       border-bottom: 3px solid {SUN_ORANGE};
       padding: 14px 22px; margin: -1.2rem -1.2rem 1.0rem -1.2rem;
   }}
-  .wingtra-wordmark {{ color: {SUN_ORANGE}; font-size: 30px; font-weight: 800; letter-spacing: .5px; }}
-  .wingtra-subtitle {{ color: {URANUS300}; font-size: 14px; font-weight: 600; }}
+  .wingtra-header img {{ height: 30px; }}
+  .wingtra-wordmark {{ color: {SUN_ORANGE}; font-size: 28px; font-weight: 800; letter-spacing: .5px; }}
+  .wingtra-title {{ color: #FFFFFF; font-size: 20px; font-weight: 800; line-height: 1.2; }}
+  .wingtra-subtitle {{ color: {URANUS300}; font-size: 12.5px; font-weight: 500; }}
 
   div[data-testid="stMetric"] {{
       background: #FFFFFF; border: 1px solid #D7E0E2; border-radius: 12px;
@@ -69,19 +83,33 @@ CSS = f"""
 """
 
 # --------------------------------------------------------------------------- #
-#  Helpers
+#  Branding helpers
 # --------------------------------------------------------------------------- #
-def render_header():
+def _logo_b64():
+    if os.path.exists(LOGO_PATH):
+        try:
+            return base64.b64encode(open(LOGO_PATH, "rb").read()).decode()
+        except Exception:
+            return None
+    return None
+
+
+def render_header(subtitle="Point cloud · Digital terrain model"):
+    st.markdown(CSS, unsafe_allow_html=True)
+    b64 = _logo_b64()
+    brand = (f'<img src="data:image/png;base64,{b64}" alt="Wingtra"/>' if b64
+             else f'<span class="wingtra-wordmark">wingtra</span>')
+    sub = f'<div class="wingtra-subtitle">{subtitle}</div>' if subtitle else ""
     st.markdown(
-        f'<div class="wingtra-header">'
-        f'<span class="wingtra-wordmark">wingtra</span>'
-        f'<div>'
-        f'<div style="color:#fff;font-weight:800;font-size:20px;line-height:1.2;">{APP_TITLE}</div>'
-        f'<div class="wingtra-subtitle">Point cloud · Digital terrain model</div>'
-        f'</div></div>',
+        f'<div class="wingtra-header">{brand}'
+        f'<div><div class="wingtra-title">{APP_TITLE}</div>{sub}</div></div>',
         unsafe_allow_html=True,
     )
 
+
+# --------------------------------------------------------------------------- #
+#  Helpers
+# --------------------------------------------------------------------------- #
 def _fmt_n(n):
     if n >= 1_000_000: return f"{n/1e6:.1f}M"
     if n >= 1_000:     return f"{n/1e3:.0f}K"
@@ -218,7 +246,6 @@ def render_dtm(bundle, vert_exag):
 # --------------------------------------------------------------------------- #
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    st.markdown(CSS, unsafe_allow_html=True)
     render_header()
 
     # ---- Sidebar --------------------------------------------------------- #
@@ -244,7 +271,6 @@ def main():
 
         meta = bundle["meta"]
 
-        # Layer controls
         st.header("Point cloud")
         point_size = st.slider("Point size", 1, 6, 2)
 
@@ -252,54 +278,43 @@ def main():
         for name in meta.get("layers", []):
             visible_layers[name] = st.checkbox(_layer_label(name), value=True)
 
-        # DTM controls (only shown when DTM is available)
         vert_exag = 1.0
         if bundle["dtm"] is not None:
             st.header("DTM surface")
             vert_exag = st.slider("Vertical exaggeration", 0.5, 5.0, 1.0, step=0.5)
 
-        # Survey info
         st.header("Info")
-        n_total = meta.get("n_total", 0)
         st.markdown(
             f"**Mode:** {meta['mode'].capitalize()}  \n"
-            f"**Raw points:** {_fmt_n(n_total)}  \n"
+            f"**Raw points:** {_fmt_n(meta.get('n_total', 0))}  \n"
             f"**Source CRS:** {meta.get('crs_source', '—')}  \n"
             f"**DTM:** {'Included' if meta.get('dtm_available') else 'Not available'}"
         )
 
-        # Downloads — presigned URLs go browser → R2 directly
+        # Downloads — presigned URLs (browser ↔ R2 directly)
         st.header("Downloads")
         raw_las_key = meta.get("raw_las_key")
         raw_dtm_key = meta.get("raw_dtm_key")
 
         if raw_las_key:
             try:
-                las_url = presigned_url(raw_las_key, ttl=900)
-                st.link_button(
-                    "⬇  Raw LAS (full res)",
-                    las_url,
-                    use_container_width=True,
-                    type="primary",
-                )
+                st.link_button("⬇  Raw LAS (full res)",
+                               presigned_url(raw_las_key, ttl=900),
+                               use_container_width=True, type="primary")
             except Exception:
                 st.caption("LAS download unavailable")
 
         if raw_dtm_key:
             try:
-                dtm_url = presigned_url(raw_dtm_key, ttl=900)
-                st.link_button(
-                    "⬇  DTM GeoTIFF (LiDAR360)",
-                    dtm_url,
-                    use_container_width=True,
-                )
+                st.link_button("⬇  DTM GeoTIFF (LiDAR360)",
+                               presigned_url(raw_dtm_key, ttl=900),
+                               use_container_width=True)
             except Exception:
                 st.caption("DTM download unavailable")
 
         if not raw_las_key and not raw_dtm_key:
-            st.caption("No raw files — re-run the preprocessing script to upload them.")
+            st.caption("Re-run the preprocessing script to add raw file downloads.")
 
-        # Refresh
         if st.button("⟳ Refresh surveys"):
             refresh_surveys(); st.rerun()
 
