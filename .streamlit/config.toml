@@ -1,0 +1,7 @@
+[theme]
+base = "light"
+primaryColor = "#F46F29"            # Sun Orange — accent for buttons, slider handles
+backgroundColor = "#EDF2F2"         # Uranus Blue 0 — light canvas
+secondaryBackgroundColor = "#FFFFFF" # cards / widgets in the main area
+textColor = "#1C2E36"               # Mercury Blue 600
+font = "sans serif"                  # standard Streamlit font (no Manrope)
