@@ -1,7 +1,7 @@
 """
-LiDAR Survey Explorer
+LIDAR Survey Explorer
 =====================
-Password-protected Streamlit app for visualising WingtraRay LiDAR surveys.
+Password-protected Streamlit app for visualising WingtraRay LIDAR surveys.
 
 Secrets (.streamlit/secrets.toml):
     app_password = "..."
@@ -23,7 +23,7 @@ import plotly.graph_objects as go
 
 from lidar_r2 import list_surveys, load_bundle, refresh_surveys, presigned_url
 
-APP_TITLE   = "LiDAR Survey Explorer"
+APP_TITLE   = "LIDAR Survey Explorer"
 LOGO_PATH   = "assets/wingtra_logo.png"
 PLACEHOLDER = "— Select a survey —"
 
@@ -85,7 +85,7 @@ CSS = f"""
       padding: 12px 16px; box-shadow: 0 1px 3px rgba(28,46,54,0.06); }}
   div[data-testid="stMetricLabel"] p {{ color: #5b6b72; font-weight: 600; }}
 
-  /* ── Empty-state card (in main area, light canvas background) ──────── */
+  /* ── Empty-state card (main area, light background) ────────────────── */
   .wingtra-card {{
       max-width: 680px; margin: 32px auto 0; padding: 28px 32px;
       background: #FFFFFF; border: 1px solid #D7E0E2; border-radius: 14px;
@@ -179,11 +179,6 @@ def _vivid_colors(z_vals):
 # --------------------------------------------------------------------------- #
 #  Point cloud tab
 # --------------------------------------------------------------------------- #
-
-# Directional lighting effect for deck.gl — gives the cloud subtle depth.
-# A single directional light from above-left plus ambient fill.
-# material=True on the layer enables shading; without pre-computed normals
-# per-point shading is limited but the overall scene gains dimension.
 _LIGHTING_EFFECT = {
     "@@type": "LightingEffect",
     "ambientLight": {
@@ -196,7 +191,7 @@ _LIGHTING_EFFECT = {
             "@@type": "DirectionalLight",
             "color": [255, 255, 255],
             "intensity": 1.0,
-            "direction": [-2, -4, -1],  # from upper-left
+            "direction": [-2, -4, -1],
         }
     ],
 }
@@ -206,56 +201,57 @@ def render_point_cloud(bundle, visible_layers, point_size):
     meta = bundle["meta"]
 
     import pandas as pd
+
     frames = [df for name, df in bundle["layers"].items()
               if visible_layers.get(name, True)]
-
     if not frames:
         st.info("No layers selected — tick at least one in the sidebar.")
         return
 
-    combined = pd.concat(frames, ignore_index=True).copy()
+    # Show a spinner during Python-side processing.
+    # Note: st.pydeck_chart() returns immediately; actual WebGL rendering
+    # happens in the browser. A short "rendering…" caption is shown below
+    # the chart to set expectations for large surveys.
+    with st.spinner("Preparing point cloud…"):
+        combined = pd.concat(frames, ignore_index=True).copy()
 
-    # Vivid elevation colouring (overrides pre-baked parquet rgb)
-    r, g, b = _vivid_colors(combined["z"].values)
-    combined["r"], combined["g"], combined["b"] = r, g, b
+        # Vivid rainbow colouring by elevation (overrides pre-baked parquet rgb)
+        r, g, b = _vivid_colors(combined["z"].values)
+        combined["r"], combined["g"], combined["b"] = r, g, b
 
-    bounds   = meta["bounds_4326"]
-    clat     = (bounds["lat_min"] + bounds["lat_max"]) / 2
-    clon     = (bounds["lon_min"] + bounds["lon_max"]) / 2
-    lon_span = bounds["lon_max"] - bounds["lon_min"]
-    zoom     = max(10, min(17, round(np.log2(360 / lon_span) - 1)))
+        bounds   = meta["bounds_4326"]
+        clat     = (bounds["lat_min"] + bounds["lat_max"]) / 2
+        clon     = (bounds["lon_min"] + bounds["lon_max"]) / 2
+        lon_span = bounds["lon_max"] - bounds["lon_min"]
+        zoom     = max(10, min(17, round(np.log2(360 / lon_span) - 1)))
 
-    layer = pdk.Layer(
-        "PointCloudLayer",
-        data=combined,
-        get_position=["lon", "lat", "z"],
-        get_color=["r", "g", "b"],
-        point_size=point_size,
-        pickable=True,
-        # material enables the layer to respond to the deck-level lighting effect.
-        # Without per-point normal vectors the shading is applied at the cloud
-        # level (directional gradient) rather than per-point — still adds depth.
-        material={
-            "ambient": 0.4,
-            "diffuse": 0.6,
-            "shininess": 32,
-            "specularColor": [60, 60, 60],
-        },
-    )
+        layer = pdk.Layer(
+            "PointCloudLayer",
+            data=combined,
+            get_position=["lon", "lat", "z"],
+            get_color=["r", "g", "b"],
+            point_size=point_size,
+            pickable=True,
+            material={
+                "ambient": 0.4,
+                "diffuse": 0.6,
+                "shininess": 32,
+                "specularColor": [60, 60, 60],
+            },
+        )
+        view = pdk.ViewState(
+            latitude=clat, longitude=clon,
+            zoom=zoom, pitch=55, bearing=0,
+        )
+        deck = pdk.Deck(
+            layers=[layer],
+            initial_view_state=view,
+            map_provider=None,
+            map_style="",
+            tooltip={"text": "Z: {z} m"},
+            effects=[_LIGHTING_EFFECT],
+        )
 
-    view = pdk.ViewState(
-        latitude=clat, longitude=clon,
-        zoom=zoom, pitch=55, bearing=0,
-    )
-
-    deck = pdk.Deck(
-        layers=[layer],
-        initial_view_state=view,
-        map_provider=None,
-        map_style="",              # transparent → black canvas
-        tooltip={"text": "Z: {z} m"},
-        effects=[_LIGHTING_EFFECT],
-    )
     st.pydeck_chart(deck, use_container_width=True)
 
     n_display = sum(len(bundle["layers"][n]) for n in visible_layers
@@ -268,9 +264,9 @@ def render_point_cloud(bundle, visible_layers, point_size):
 
     st.caption(
         f"{'Classified' if meta['mode'] == 'classified' else 'Unclassified'} "
-        f"point cloud · {_fmt_n(n_display)} display pts subsampled from "
+        f"LIDAR point cloud · {_fmt_n(n_display)} display pts from "
         f"{_fmt_n(meta.get('n_total', 0))} raw · colours = elevation · "
-        "directional lighting enabled"
+        "large surveys may take a few seconds to fully render in the browser"
     )
 
 
@@ -283,12 +279,12 @@ DTM_COLORSCALES = ["Turbo", "Viridis", "Plasma", "Inferno", "Earth", "RdYlBu"]
 def render_dtm(bundle, vert_exag, colorscale):
     dtm, dtm_meta = bundle["dtm"], bundle["dtm_meta"]
     if dtm is None:
-        st.info("No DTM available for this survey.")
+        st.info("No terrain model available for this survey.")
         return
 
     finite_mask = np.isfinite(dtm)
     if not finite_mask.any():
-        st.warning("DTM contains no valid elevation values.")
+        st.warning("Terrain model contains no valid elevation values.")
         return
 
     z_min_disp = float(np.min(dtm[finite_mask]))
@@ -310,8 +306,8 @@ def render_dtm(bundle, vert_exag, colorscale):
     x_m  = (lons - lon0) * m_lon
     y_m  = (lats - lat0) * m_lat
 
-    z_pl      = dtm * vert_exag  # NaN preserved → transparent holes
-    dtm_hover = dtm              # NaN for nodata; tooltip won't fire on holes
+    z_pl      = dtm * vert_exag   # NaN preserved → transparent holes in surface
+    dtm_hover = dtm               # NaN for nodata; tooltip won't fire on holes
 
     # ---- Aspect ratio --------------------------------------------------- #
     span_x = float(x_m.max() - x_m.min())
@@ -328,11 +324,11 @@ def render_dtm(bundle, vert_exag, colorscale):
         cmin=z_min_disp,
         cmax=z_max_disp,
         colorbar=dict(
-            title="Elevation (m)",
+            # Plotly 5.x API: title as dict, not title_font kwarg
+            title=dict(text="Elevation (m)", font=dict(color="#cccccc")),
             tickvals=tick_vals,
             ticktext=[f"{v:.0f}" for v in tick_vals],
             tickfont=dict(color="#cccccc"),
-            title_font=dict(color="#cccccc"),
             thickness=14, len=0.7,
         ),
         customdata=dtm_hover,
@@ -344,30 +340,36 @@ def render_dtm(bundle, vert_exag, colorscale):
         ),
     )])
 
-    # Note: plot_bgcolor is 2D-only and must NOT be set for 3D figures —
-    # use scene.bgcolor and paper_bgcolor instead.
+    # Plotly 5.x API: axis title must use title=dict(text=..., font=dict(...))
+    # Using the legacy titlefont= kwarg raises a ValueError in newer Plotly.
+    axis_style = dict(
+        tickfont=dict(color="#888888"),
+        gridcolor="#2a2a3a",
+        showbackground=False,
+    )
     fig.update_layout(
         scene=dict(
-            xaxis=dict(title="Easting offset (m)",
-                       titlefont=dict(color="#aaaaaa"),
-                       tickfont=dict(color="#888888"),
-                       gridcolor="#2a2a3a", showbackground=False),
-            yaxis=dict(title="Northing offset (m)",
-                       titlefont=dict(color="#aaaaaa"),
-                       tickfont=dict(color="#888888"),
-                       gridcolor="#2a2a3a", showbackground=False),
-            zaxis=dict(title="Elevation (m)",
-                       titlefont=dict(color="#aaaaaa"),
-                       tickfont=dict(color="#888888"),
-                       gridcolor="#2a2a3a", showbackground=False),
+            xaxis=dict(
+                title=dict(text="Easting offset (m)", font=dict(color="#aaaaaa")),
+                **axis_style,
+            ),
+            yaxis=dict(
+                title=dict(text="Northing offset (m)", font=dict(color="#aaaaaa")),
+                **axis_style,
+            ),
+            zaxis=dict(
+                title=dict(text="Elevation (m)", font=dict(color="#aaaaaa")),
+                **axis_style,
+            ),
             aspectmode="manual",
             aspectratio=dict(x=span_x/ms, y=span_y/ms, z=span_z/ms),
             bgcolor=scene_bg,
         ),
         margin=dict(l=0, r=0, t=0, b=0),
-        paper_bgcolor=scene_bg,   # outer figure background
-        # plot_bgcolor is 2D only — omitted here to avoid Plotly error
+        paper_bgcolor=scene_bg,
+        # plot_bgcolor is 2D-layout only — must NOT be set for 3D figures
     )
+
     st.plotly_chart(fig, use_container_width=True)
 
     res  = dtm_meta.get("src_resolution_m", "—")
@@ -378,7 +380,7 @@ def render_dtm(bundle, vert_exag, colorscale):
     cols[3].metric("Source res.",   f"{res} m/px" if isinstance(res, (int, float)) else str(res))
 
     st.caption(
-        f"DTM from LiDAR360 · {nrows}×{ncols} grid (decimated for display) · "
+        f"Digital terrain model · {nrows}×{ncols} grid (decimated for display) · "
         f"vertical exaggeration {vert_exag:.1f}× · colorscale: {colorscale}"
     )
 
@@ -394,7 +396,6 @@ def main():
 
     render_header()
 
-    # Defaults — overwritten below when a survey is picked and loaded
     bundle         = None
     visible_layers = {}
     point_size     = 2
@@ -442,19 +443,21 @@ def main():
                             _layer_label(name), value=True)
 
                     if bundle["dtm"] is not None:
-                        st.header("DTM surface")
+                        st.header("Terrain model")
                         vert_exag = st.slider(
                             "Vertical exaggeration", 0.5, 5.0, 1.0, step=0.5,
                             help=(
                                 "Multiplies elevation values to amplify relief. "
-                                "1.0 = true scale. Try 2–3× for flat plantation "
-                                "terrain."
+                                "1.0 = true scale. Try 2–3× for relatively flat "
+                                "plantation terrain."
                             ),
                         )
                         colorscale = st.selectbox(
                             "Colorscale", DTM_COLORSCALES, index=0,
-                            help="Turbo = most vivid. Viridis/Plasma = "
-                                 "perceptually uniform.",
+                            help=(
+                                "Turbo = most vivid rainbow. "
+                                "Viridis/Plasma = perceptually uniform."
+                            ),
                         )
 
                     st.header("Info")
@@ -482,7 +485,7 @@ def main():
                     if raw_dtm_key:
                         try:
                             st.link_button(
-                                "⬇  DTM GeoTIFF (LiDAR360)",
+                                "⬇  Terrain model (GeoTIFF)",
                                 presigned_url(raw_dtm_key, ttl=900),
                                 use_container_width=True)
                         except Exception:
@@ -496,18 +499,16 @@ def main():
                 refresh_surveys(); st.rerun()
 
     # ---- Main area ------------------------------------------------------- #
-    # Empty state: render in main area (light background), NOT the sidebar.
-    # This keeps the card visually clean and separate from the dark sidebar.
     if picked == PLACEHOLDER or bundle is None:
         st.markdown(
             """<div class="wingtra-card">
               <div class="wingtra-card-title">Select a survey to begin</div>
               <p>Pick a dataset from the <b>Dataset</b> dropdown in the sidebar.</p>
               <ul>
-                <li>Point cloud coloured by elevation — vivid rainbow scale on a dark canvas</li>
-                <li>Directional lighting for perceived depth</li>
-                <li>Digital terrain model from LiDAR360 with adjustable vertical exaggeration</li>
-                <li>Download the raw LAS and DTM GeoTIFF from the Downloads section</li>
+                <li>LIDAR point cloud coloured by elevation — vivid rainbow scale on a dark canvas</li>
+                <li>Directional lighting for perceived depth and dimension</li>
+                <li>Digital terrain model with adjustable vertical exaggeration and colorscale</li>
+                <li>Download the raw LAS and terrain model GeoTIFF from the Downloads section</li>
               </ul>
             </div>""",
             unsafe_allow_html=True,
@@ -517,7 +518,7 @@ def main():
     # ---- Tabs ------------------------------------------------------------ #
     tab_labels = ["☁  Point Cloud"]
     if bundle["dtm"] is not None:
-        tab_labels.append("⛰  DTM Surface")
+        tab_labels.append("⛰  Terrain Model")
 
     tabs = st.tabs(tab_labels)
 
