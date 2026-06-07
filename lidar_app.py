@@ -53,17 +53,13 @@ CSS = f"""
   div[data-baseweb="popover"] li, ul[role="listbox"] li {{ color: #FFFFFF; }}
   ul[role="listbox"] li:hover {{ background-color: #16242B; }}
 
-  /* ── Sidebar secondary buttons: dark bg so white text is visible ────── */
-  /* Without this, white text on white button background = invisible       */
+  /* ── Sidebar secondary buttons/links: dark bg so text stays visible ── */
   section[data-testid="stSidebar"] button[kind="secondary"],
-  section[data-testid="stSidebar"] button[kind="secondary"]:hover,
-  section[data-testid="stSidebar"] [data-testid="baseButton-secondary"],
-  section[data-testid="stSidebar"] [data-testid="baseButton-secondary"]:hover {{
+  section[data-testid="stSidebar"] [data-testid="baseButton-secondary"] {{
       background-color: #16242B !important;
       border: 1px solid #3A4F59 !important;
       color: #FFFFFF !important;
   }}
-  /* Secondary link buttons in sidebar */
   section[data-testid="stSidebar"] [data-testid="stLinkButtonContainer"] a,
   section[data-testid="stSidebar"] .stLinkButton a {{
       background-color: #16242B !important;
@@ -89,14 +85,14 @@ CSS = f"""
       padding: 12px 16px; box-shadow: 0 1px 3px rgba(28,46,54,0.06); }}
   div[data-testid="stMetricLabel"] p {{ color: #5b6b72; font-weight: 600; }}
 
-  /* ── Empty-state card ──────────────────────────────────────────────── */
+  /* ── Empty-state card (in main area, light canvas background) ──────── */
   .wingtra-card {{
-      max-width: 680px; margin: 10px 0 0; padding: 22px 26px;
+      max-width: 680px; margin: 32px auto 0; padding: 28px 32px;
       background: #FFFFFF; border: 1px solid #D7E0E2; border-radius: 14px;
       box-shadow: 0 1px 4px rgba(28,46,54,0.08); }}
-  .wingtra-card-title {{ color: {MERCURY600}; font-size: 18px; font-weight: 800; margin-bottom: 6px; }}
+  .wingtra-card-title {{ color: {MERCURY600}; font-size: 20px; font-weight: 800; margin-bottom: 8px; }}
   .wingtra-card p, .wingtra-card li {{ color: #46555b; font-size: 14px; line-height: 1.6; }}
-  .wingtra-card ul {{ margin: 8px 0 0; padding-left: 20px; }}
+  .wingtra-card ul {{ margin: 10px 0 0; padding-left: 22px; }}
 </style>
 """
 
@@ -159,8 +155,8 @@ def _layer_label(name):
 
 
 def _vivid_colors(z_vals):
-    """Vivid rainbow elevation scale — works well on a dark background.
-    Low → blue → cyan → green → yellow → orange → red (high)."""
+    """7-stop rainbow elevation scale — vivid on dark backgrounds.
+    Deep blue (low) → cyan → green → yellow → orange → red (high)."""
     v = np.asarray(z_vals, dtype="float64")
     finite = v[np.isfinite(v)]
     if finite.size == 0:
@@ -170,7 +166,7 @@ def _vivid_colors(z_vals):
     t = np.clip((v - z_lo) / max(z_hi - z_lo, 1e-3), 0, 1)
 
     stops_t = [0.00, 0.15, 0.35, 0.55, 0.75, 0.90, 1.00]
-    stops_r = [  20,    0,    0,   50, 230,  255,  180]
+    stops_r = [  20,    0,    0,   50,  230,  255,  180]
     stops_g = [  20,   80,  200,  220,  220,  120,    0]
     stops_b = [ 160,  220,  230,   80,    0,    0,    0]
 
@@ -183,6 +179,29 @@ def _vivid_colors(z_vals):
 # --------------------------------------------------------------------------- #
 #  Point cloud tab
 # --------------------------------------------------------------------------- #
+
+# Directional lighting effect for deck.gl — gives the cloud subtle depth.
+# A single directional light from above-left plus ambient fill.
+# material=True on the layer enables shading; without pre-computed normals
+# per-point shading is limited but the overall scene gains dimension.
+_LIGHTING_EFFECT = {
+    "@@type": "LightingEffect",
+    "ambientLight": {
+        "@@type": "AmbientLight",
+        "color": [255, 255, 255],
+        "intensity": 0.5,
+    },
+    "_lights": [
+        {
+            "@@type": "DirectionalLight",
+            "color": [255, 255, 255],
+            "intensity": 1.0,
+            "direction": [-2, -4, -1],  # from upper-left
+        }
+    ],
+}
+
+
 def render_point_cloud(bundle, visible_layers, point_size):
     meta = bundle["meta"]
 
@@ -196,9 +215,7 @@ def render_point_cloud(bundle, visible_layers, point_size):
 
     combined = pd.concat(frames, ignore_index=True).copy()
 
-    # Re-colour by elevation with a vivid scale (overrides pre-baked parquet rgb).
-    # This means new surveys get vivid colours automatically regardless of how
-    # they were colour-baked during preprocessing.
+    # Vivid elevation colouring (overrides pre-baked parquet rgb)
     r, g, b = _vivid_colors(combined["z"].values)
     combined["r"], combined["g"], combined["b"] = r, g, b
 
@@ -215,17 +232,29 @@ def render_point_cloud(bundle, visible_layers, point_size):
         get_color=["r", "g", "b"],
         point_size=point_size,
         pickable=True,
+        # material enables the layer to respond to the deck-level lighting effect.
+        # Without per-point normal vectors the shading is applied at the cloud
+        # level (directional gradient) rather than per-point — still adds depth.
+        material={
+            "ambient": 0.4,
+            "diffuse": 0.6,
+            "shininess": 32,
+            "specularColor": [60, 60, 60],
+        },
     )
-    view = pdk.ViewState(latitude=clat, longitude=clon,
-                         zoom=zoom, pitch=55, bearing=0)
 
-    # Dark/black background — no basemap needed, vivid colours pop on dark
+    view = pdk.ViewState(
+        latitude=clat, longitude=clon,
+        zoom=zoom, pitch=55, bearing=0,
+    )
+
     deck = pdk.Deck(
         layers=[layer],
         initial_view_state=view,
         map_provider=None,
-        map_style="",          # fully transparent → black pydeck canvas
+        map_style="",              # transparent → black canvas
         tooltip={"text": "Z: {z} m"},
+        effects=[_LIGHTING_EFFECT],
     )
     st.pydeck_chart(deck, use_container_width=True)
 
@@ -240,16 +269,16 @@ def render_point_cloud(bundle, visible_layers, point_size):
     st.caption(
         f"{'Classified' if meta['mode'] == 'classified' else 'Unclassified'} "
         f"point cloud · {_fmt_n(n_display)} display pts subsampled from "
-        f"{_fmt_n(meta.get('n_total', 0))} raw · colours = elevation"
+        f"{_fmt_n(meta.get('n_total', 0))} raw · colours = elevation · "
+        "directional lighting enabled"
     )
 
 
 # --------------------------------------------------------------------------- #
 #  DTM surface tab
 # --------------------------------------------------------------------------- #
+DTM_COLORSCALES = ["Turbo", "Viridis", "Plasma", "Inferno", "Earth", "RdYlBu"]
 
-# Vivid colorscales available in Plotly — user can switch in the sidebar
-DTM_COLORSCALES = ["Viridis", "Plasma", "Turbo", "Inferno", "Earth", "RdYlBu"]
 
 def render_dtm(bundle, vert_exag, colorscale):
     dtm, dtm_meta = bundle["dtm"], bundle["dtm_meta"]
@@ -265,9 +294,9 @@ def render_dtm(bundle, vert_exag, colorscale):
     z_min_disp = float(np.min(dtm[finite_mask]))
     z_max_disp = float(np.max(dtm[finite_mask]))
 
-    # ---- Orientation fix ----------------------------------------------- #
+    # ---- Orientation ---------------------------------------------------- #
     # Rasterio stores rows north→south (row 0 = max latitude).
-    # Build lat array in the SAME direction so dtm[i] aligns with lats[i].
+    # Build lat array in the same direction so dtm[i] → lats[i] is correct.
     bounds = dtm_meta["bounds_4326"]
     lat0   = (bounds["lat_min"] + bounds["lat_max"]) / 2
     lon0   = (bounds["lon_min"] + bounds["lon_max"]) / 2
@@ -276,19 +305,13 @@ def render_dtm(bundle, vert_exag, colorscale):
 
     nrows, ncols = dtm.shape
     lons = np.linspace(bounds["lon_min"], bounds["lon_max"], ncols)
-    # North-to-south: lats[0] = lat_max (matches rasterio row 0 = northernmost)
-    lats = np.linspace(bounds["lat_max"], bounds["lat_min"], nrows)
+    lats = np.linspace(bounds["lat_max"], bounds["lat_min"], nrows)  # N→S
 
     x_m  = (lons - lon0) * m_lon
-    y_m  = (lats - lat0) * m_lat  # positive = north of centre
+    y_m  = (lats - lat0) * m_lat
 
-    # z_pl: NaN preserved → Plotly renders nodata regions as transparent holes
-    z_pl = dtm * vert_exag
-
-    # customdata: true (non-exaggerated) elevation for the tooltip.
-    # Keeping NaN here is correct — NaN surface cells have no geometry to hover,
-    # so the tooltip is never triggered for nodata holes.
-    dtm_hover = dtm  # NaN where nodata; tooltip won't fire there
+    z_pl      = dtm * vert_exag  # NaN preserved → transparent holes
+    dtm_hover = dtm              # NaN for nodata; tooltip won't fire on holes
 
     # ---- Aspect ratio --------------------------------------------------- #
     span_x = float(x_m.max() - x_m.min())
@@ -297,6 +320,7 @@ def render_dtm(bundle, vert_exag, colorscale):
     ms     = max(span_x, span_y, span_z, 1)
 
     tick_vals = np.linspace(z_min_disp, z_max_disp, 6)
+    scene_bg  = "rgb(12, 12, 18)"
 
     fig = go.Figure(data=[go.Surface(
         z=z_pl, x=x_m, y=y_m,
@@ -320,8 +344,8 @@ def render_dtm(bundle, vert_exag, colorscale):
         ),
     )])
 
-    # Dark background — terrain colours pop on a near-black scene
-    scene_bg = "rgb(12, 12, 18)"
+    # Note: plot_bgcolor is 2D-only and must NOT be set for 3D figures —
+    # use scene.bgcolor and paper_bgcolor instead.
     fig.update_layout(
         scene=dict(
             xaxis=dict(title="Easting offset (m)",
@@ -341,8 +365,8 @@ def render_dtm(bundle, vert_exag, colorscale):
             bgcolor=scene_bg,
         ),
         margin=dict(l=0, r=0, t=0, b=0),
-        paper_bgcolor=scene_bg,
-        plot_bgcolor=scene_bg,
+        paper_bgcolor=scene_bg,   # outer figure background
+        # plot_bgcolor is 2D only — omitted here to avoid Plotly error
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -370,6 +394,14 @@ def main():
 
     render_header()
 
+    # Defaults — overwritten below when a survey is picked and loaded
+    bundle         = None
+    visible_layers = {}
+    point_size     = 2
+    vert_exag      = 1.0
+    colorscale     = "Turbo"
+    picked         = PLACEHOLDER
+
     # ---- Sidebar --------------------------------------------------------- #
     with st.sidebar:
         st.header("Survey")
@@ -379,111 +411,108 @@ def main():
             st.warning("No surveys found in R2.")
             if st.button("⟳ Refresh"):
                 refresh_surveys(); st.rerun()
-            return
+        else:
+            options = [PLACEHOLDER] + [s["name"] for s in surveys]
+            picked  = st.selectbox("Dataset", options, index=0)
 
-        options = [PLACEHOLDER] + [s["name"] for s in surveys]
-        picked  = st.selectbox("Dataset", options, index=0)
+            if picked != PLACEHOLDER:
+                survey = next(s for s in surveys if s["name"] == picked)
 
-        # ---- Empty state: no dataset selected ----------------------------- #
-        if picked == PLACEHOLDER:
-            st.markdown(
-                """<div class="wingtra-card">
-                  <div class="wingtra-card-title">Get started</div>
-                  <p>Select a survey from the <b>Dataset</b> dropdown above to begin.</p>
-                  <ul>
-                    <li>Point cloud coloured by elevation — vivid rainbow scale</li>
-                    <li>Digital terrain model from LiDAR360 with adjustable vertical exaggeration</li>
-                    <li>Download the raw LAS and DTM GeoTIFF from the Downloads section</li>
-                  </ul>
-                </div>""",
-                unsafe_allow_html=True,
-            )
-            # Show refresh button even in empty state
+                with st.spinner(f"Loading {picked} …"):
+                    try:
+                        bundle = load_bundle(survey["slug"])
+                    except Exception as e:
+                        st.error(f"Could not load bundle: {e}")
+                        bundle = None
+
+                if bundle:
+                    meta = bundle["meta"]
+
+                    st.header("Point cloud")
+                    point_size = st.slider(
+                        "Point size", 1, 6, 2,
+                        help=(
+                            "Pixel size of each rendered point. "
+                            "Increase for sparse clouds; decrease if it looks "
+                            "blocky. Higher values slow rendering."
+                        ),
+                    )
+                    for name in meta.get("layers", []):
+                        visible_layers[name] = st.checkbox(
+                            _layer_label(name), value=True)
+
+                    if bundle["dtm"] is not None:
+                        st.header("DTM surface")
+                        vert_exag = st.slider(
+                            "Vertical exaggeration", 0.5, 5.0, 1.0, step=0.5,
+                            help=(
+                                "Multiplies elevation values to amplify relief. "
+                                "1.0 = true scale. Try 2–3× for flat plantation "
+                                "terrain."
+                            ),
+                        )
+                        colorscale = st.selectbox(
+                            "Colorscale", DTM_COLORSCALES, index=0,
+                            help="Turbo = most vivid. Viridis/Plasma = "
+                                 "perceptually uniform.",
+                        )
+
+                    st.header("Info")
+                    st.markdown(
+                        f"**Mode:** {meta['mode'].capitalize()}  \n"
+                        f"**Raw points:** {_fmt_n(meta.get('n_total', 0))}  \n"
+                        f"**Source CRS:** {meta.get('crs_source', '—')}  \n"
+                        f"**DTM:** "
+                        f"{'Included' if meta.get('dtm_available') else 'Not available'}"
+                    )
+
+                    st.header("Downloads")
+                    raw_las_key = meta.get("raw_las_key")
+                    raw_dtm_key = meta.get("raw_dtm_key")
+
+                    if raw_las_key:
+                        try:
+                            st.link_button(
+                                "⬇  Raw LAS (full res)",
+                                presigned_url(raw_las_key, ttl=900),
+                                use_container_width=True, type="primary")
+                        except Exception:
+                            st.caption("LAS download unavailable")
+
+                    if raw_dtm_key:
+                        try:
+                            st.link_button(
+                                "⬇  DTM GeoTIFF (LiDAR360)",
+                                presigned_url(raw_dtm_key, ttl=900),
+                                use_container_width=True)
+                        except Exception:
+                            st.caption("DTM download unavailable")
+
+                    if not raw_las_key and not raw_dtm_key:
+                        st.caption(
+                            "Re-run the preprocessing script to add downloads.")
+
             if st.button("⟳ Refresh surveys"):
                 refresh_surveys(); st.rerun()
-            st.stop()
 
-        # ---- Load selected bundle ----------------------------------------- #
-        survey = next(s for s in surveys if s["name"] == picked)
-
-        with st.spinner(f"Loading {picked} …"):
-            try:
-                bundle = load_bundle(survey["slug"])
-            except Exception as e:
-                st.error(f"Could not load bundle: {e}")
-                return
-
-        meta = bundle["meta"]
-
-        # Point cloud controls
-        st.header("Point cloud")
-        point_size = st.slider(
-            "Point size", 1, 6, 2,
-            help=(
-                "Size of each rendered point in pixels. "
-                "Increase if the cloud looks sparse or hard to read; "
-                "decrease if it looks blocky or over-saturated. "
-                "Higher values slow rendering for large point counts."
-            ),
-        )
-        visible_layers = {}
-        for name in meta.get("layers", []):
-            visible_layers[name] = st.checkbox(_layer_label(name), value=True)
-
-        # DTM controls (only when DTM exists)
-        vert_exag  = 1.0
-        colorscale = "Turbo"
-        if bundle["dtm"] is not None:
-            st.header("DTM surface")
-            vert_exag = st.slider(
-                "Vertical exaggeration", 0.5, 5.0, 1.0, step=0.5,
-                help=(
-                    "Multiplies elevation values to amplify terrain relief. "
-                    "1.0 = true scale. Try 2–3× for relatively flat plantation "
-                    "terrain to make subtle slopes visible."
-                ),
-            )
-            colorscale = st.selectbox(
-                "Colorscale", DTM_COLORSCALES, index=0,
-                help="Colour mapping for the terrain surface. "
-                     "Turbo = most vivid rainbow. Viridis/Plasma = perceptually uniform.",
-            )
-
-        # Info
-        st.header("Info")
+    # ---- Main area ------------------------------------------------------- #
+    # Empty state: render in main area (light background), NOT the sidebar.
+    # This keeps the card visually clean and separate from the dark sidebar.
+    if picked == PLACEHOLDER or bundle is None:
         st.markdown(
-            f"**Mode:** {meta['mode'].capitalize()}  \n"
-            f"**Raw points:** {_fmt_n(meta.get('n_total', 0))}  \n"
-            f"**Source CRS:** {meta.get('crs_source', '—')}  \n"
-            f"**DTM:** {'Included' if meta.get('dtm_available') else 'Not available'}"
+            """<div class="wingtra-card">
+              <div class="wingtra-card-title">Select a survey to begin</div>
+              <p>Pick a dataset from the <b>Dataset</b> dropdown in the sidebar.</p>
+              <ul>
+                <li>Point cloud coloured by elevation — vivid rainbow scale on a dark canvas</li>
+                <li>Directional lighting for perceived depth</li>
+                <li>Digital terrain model from LiDAR360 with adjustable vertical exaggeration</li>
+                <li>Download the raw LAS and DTM GeoTIFF from the Downloads section</li>
+              </ul>
+            </div>""",
+            unsafe_allow_html=True,
         )
-
-        # Downloads
-        st.header("Downloads")
-        raw_las_key = meta.get("raw_las_key")
-        raw_dtm_key = meta.get("raw_dtm_key")
-
-        if raw_las_key:
-            try:
-                st.link_button("⬇  Raw LAS (full res)",
-                               presigned_url(raw_las_key, ttl=900),
-                               use_container_width=True, type="primary")
-            except Exception:
-                st.caption("LAS download unavailable")
-
-        if raw_dtm_key:
-            try:
-                st.link_button("⬇  DTM GeoTIFF (LiDAR360)",
-                               presigned_url(raw_dtm_key, ttl=900),
-                               use_container_width=True)
-            except Exception:
-                st.caption("DTM download unavailable")
-
-        if not raw_las_key and not raw_dtm_key:
-            st.caption("Re-run the preprocessing script to add raw file downloads.")
-
-        if st.button("⟳ Refresh surveys"):
-            refresh_surveys(); st.rerun()
+        st.stop()
 
     # ---- Tabs ------------------------------------------------------------ #
     tab_labels = ["☁  Point Cloud"]
