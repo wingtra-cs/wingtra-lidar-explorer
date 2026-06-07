@@ -1,0 +1,16 @@
+# LiDAR Survey Explorer — app dependencies
+# These are the runtime dependencies for lidar_app.py and lidar_r2.py.
+# The tools/ scripts (preprocess, diagnose, patch) run locally and need
+# additional packages installed in your local environment — see README.
+
+streamlit>=1.28.0
+pydeck>=0.8.0
+plotly>=5.18.0
+numpy>=1.24.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+boto3>=1.28.0
+
+# After the first successful Streamlit Community Cloud build, freeze exact
+# versions from the build log and replace the above with pinned ~= ranges
+# (e.g. streamlit~=1.32.0) so deployments stay reproducible.
