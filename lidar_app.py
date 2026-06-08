@@ -328,9 +328,13 @@ def _potree_html(potree_url, assets_base, survey_name,
         try {{
             Potree.scriptPath = "{assets_base}";
 
-            const viewer = new Potree.Viewer(
-                document.getElementById("potree_render_area")
-            );
+            var el = document.getElementById("potree_render_area");
+                    function _awaitSize(cb) {{
+                        if (el.clientWidth > 0 && el.clientHeight > 0) cb();
+                        else requestAnimationFrame(function() {{ _awaitSize(cb); }});
+                    }}
+                    _awaitSize(function() {{
+                    const viewer = new Potree.Viewer(el);
             viewer.setEDLEnabled({edl_js});
             viewer.setEDLRadius(1.4);
             viewer.setEDLStrength(0.4);
@@ -369,6 +373,7 @@ def _potree_html(potree_url, assets_base, survey_name,
                 }}
             }});
 
+        }}); // end _awaitSize
         }} catch(e) {{
             showError("Viewer init failed: " + e);
         }}
