@@ -189,7 +189,7 @@ _DEPS = [
     # jQuery UI — slider/accordion used by Potree sidebar
     "https://cdnjs.cloudflare.com/ajax/libs/jqueryui/1.12.1/jquery-ui.min.js",
     # TWEEN.js — camera animation, required by Viewer constructor
-    "https://cdn.jsdelivr.net/gh/potree/potree@1.8.2/libs/tween/tween.min.js",,
+    "https://cdn.jsdelivr.net/gh/potree/potree@1.8.2/libs/tween/tween.min.js",
     # i18next — internationalisation used by Potree GUI
     "https://cdnjs.cloudflare.com/ajax/libs/i18next/21.6.14/i18next.min.js",
     # jstree — scene tree in Potree sidebar
