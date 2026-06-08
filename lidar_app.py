@@ -175,24 +175,27 @@ _POTREE_COLOUR_JS = {
     """,
 }
 
+# Potree 1.8.x is built against Three.js r124.
+# Three.js is NOT bundled in potree.js and is not in the build/potree/ assets —
+# it must be loaded separately from cdnjs BEFORE potree.js runs.
+_THREE_CDN  = "https://cdnjs.cloudflare.com/ajax/libs/three.js/r124/three.min.js"
+_JQUERY_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.4/jquery.min.js"
+
 
 def _potree_html(potree_url, assets_base, survey_name,
                  point_budget, edl_enabled, colour_mode):
     """
     Self-contained Potree 1.8.x viewer HTML.
 
-    Dependency load order (critical):
-        1. Three.js  — from lazylibs/ in the R2 bucket (already uploaded).
-                       potree.js expects window.THREE to exist before it runs.
-        2. jQuery    — required by viewer.loadGUI() which initialises the
-                       Potree sidebar DOM. Without it, loadGUI throws and
-                       Potree.loadPointCloud is never registered.
-        3. potree.js — Potree core; sets up Potree.Viewer, loadPointCloud, etc.
+    Dependency load order:
+        1. three.js r124  — from cdnjs; window.THREE must exist before potree.js
+        2. jquery 3.6     — from cdnjs; required by viewer.loadGUI() DOM setup
+        3. potree.js      — from R2; registers Potree.Viewer and friends
 
-    Then: new Potree.Viewer() → viewer.loadGUI() → Potree.loadPointCloud()
+    After init:
+        new Potree.Viewer() → viewer.loadGUI() → Potree.loadPointCloud()
 
-    The Potree sidebar created by loadGUI is immediately suppressed — we use
-    the Streamlit sidebar for all controls.
+    The Potree sidebar created by loadGUI() is immediately hidden.
     """
     colour_js = _POTREE_COLOUR_JS.get(colour_mode, _POTREE_COLOUR_JS["Elevation"])
     edl_js    = "true" if edl_enabled else "false"
@@ -242,16 +245,19 @@ def _potree_html(potree_url, assets_base, survey_name,
   </div>
 
   <!--
-    Dependency load order — all three must be present before the init script:
-      1. three.js  — window.THREE global required by potree.js internals
-      2. jquery    — required by viewer.loadGUI() to build its DOM panels
-      3. potree.js — Potree core (Viewer, loadPointCloud, Gradients, etc.)
+    Load order is critical — all three must complete before the init script runs.
 
-    three.js lives in lazylibs/ inside the same potree-assets upload.
-    jquery is loaded from cdnjs (not bundled in the Potree 1.8.x build).
+    1. three.js r124   Potree 1.8.x is built against r124 specifically.
+                       window.THREE must exist before potree.js executes.
+                       NOT bundled in potree.js and NOT in lazylibs/ on R2.
+
+    2. jquery 3.6      Required by viewer.loadGUI() to build the Potree sidebar
+                       DOM panels (which we then immediately hide).
+
+    3. potree.js       Core Potree — registers Viewer, loadPointCloud, etc.
   -->
-  <script src="{assets_base}/lazylibs/three.js/build/three.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.4/jquery.min.js"></script>
+  <script src="{_THREE_CDN}"></script>
+  <script src="{_JQUERY_CDN}"></script>
   <script src="{assets_base}/potree.js"></script>
 
   <script>
@@ -265,14 +271,13 @@ def _potree_html(potree_url, assets_base, survey_name,
         console.error("[Potree]", msg);
     }}
 
-    // Confirm THREE and Potree loaded before proceeding
     if (typeof THREE === "undefined") {{
-        showError("THREE.js failed to load from lazylibs/ — check R2 path.");
+        showError("THREE r124 failed to load from cdnjs.");
     }} else if (typeof Potree === "undefined") {{
-        showError("Potree failed to load — check potree.js in R2.");
+        showError("Potree failed to load from R2.");
     }} else {{
-        console.log("[Potree] THREE r" + THREE.REVISION + " loaded");
-        console.log("[Potree] Potree loaded, Viewer:", typeof Potree.Viewer);
+        console.log("[Potree] THREE r" + THREE.REVISION + " ✓");
+        console.log("[Potree] Potree.Viewer type:", typeof Potree.Viewer);
 
         try {{
             Potree.scriptPath = "{assets_base}";
@@ -290,9 +295,7 @@ def _potree_html(potree_url, assets_base, survey_name,
             const pcURL = "{potree_url}";
             console.log("[Potree] loading →", pcURL);
 
-            // In Potree 1.8.x, loadPointCloud is registered during loadGUI init
             viewer.loadGUI(() => {{
-                // Suppress the sidebar loadGUI creates
                 const sb = document.getElementById("potree_sidebar_container");
                 if (sb) sb.style.setProperty("display", "none", "important");
                 const mt = document.querySelector(".potree_menu_toggle");
