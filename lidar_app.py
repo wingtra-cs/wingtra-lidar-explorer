@@ -175,11 +175,32 @@ _POTREE_COLOUR_JS = {
     """,
 }
 
-# Potree 1.8.x is built against Three.js r124.
-# Three.js is NOT bundled in potree.js and is not in the build/potree/ assets —
-# it must be loaded separately from cdnjs BEFORE potree.js runs.
-_THREE_CDN  = "https://cdnjs.cloudflare.com/ajax/libs/three.js/r124/three.min.js"
-_JQUERY_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.4/jquery.min.js"
+# CDN URLs — all dependencies that Potree 1.8.x requires before potree.js.
+# From the official heidentor.html example:
+# jquery, spectrum, jquery-ui, BinaryHeap, tween, d3, proj4,
+# openlayers, i18next, jstree, laslaz — loaded before potree.js.
+# THREE is imported as an ES module in the official examples; here we
+# load it as a regular global script which potree.js also accepts.
+_DEPS = [
+    # THREE.js — potree.js needs window.THREE
+    "https://cdnjs.cloudflare.com/ajax/libs/three.js/r124/three.min.js",
+    # jQuery — UI and AJAX
+    "https://cdnjs.cloudflare.com/ajax/libs/jquery/3.1.1/jquery.min.js",
+    # jQuery UI — slider/accordion used by Potree sidebar
+    "https://cdnjs.cloudflare.com/ajax/libs/jqueryui/1.12.1/jquery-ui.min.js",
+    # TWEEN.js — camera animation, required by Viewer constructor
+    "https://cdnjs.cloudflare.com/ajax/libs/tween.js/r14/tween.min.js",
+    # i18next — internationalisation used by Potree GUI
+    "https://cdnjs.cloudflare.com/ajax/libs/i18next/21.6.14/i18next.min.js",
+    # jstree — scene tree in Potree sidebar
+    "https://cdnjs.cloudflare.com/ajax/libs/jstree/3.3.11/jstree.min.js",
+    # proj4 — coordinate projections (used for georeferenced data)
+    "https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.8.0/proj4.js",
+    # d3 — charts in Potree profile view
+    "https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js",
+    # spectrum — colour picker in Potree UI
+    "https://cdnjs.cloudflare.com/ajax/libs/spectrum/1.8.0/spectrum.min.js",
+]
 
 
 def _potree_html(potree_url, assets_base, survey_name,
@@ -187,18 +208,20 @@ def _potree_html(potree_url, assets_base, survey_name,
     """
     Self-contained Potree 1.8.x viewer HTML.
 
-    Dependency load order:
-        1. three.js r124  — from cdnjs; window.THREE must exist before potree.js
-        2. jquery 3.6     — from cdnjs; required by viewer.loadGUI() DOM setup
-        3. potree.js      — from R2; registers Potree.Viewer and friends
+    Dependency load order matches the official heidentor.html example exactly:
+        THREE, jQuery, jQuery UI, TWEEN, i18next, jstree, proj4, d3, spectrum
+        → potree.js
+        → init script
 
-    After init:
-        new Potree.Viewer() → viewer.loadGUI() → Potree.loadPointCloud()
+    TWEEN.js is almost certainly the critical missing piece — the Viewer
+    constructor sets up animation loops using TWEEN at construction time.
 
-    The Potree sidebar created by loadGUI() is immediately hidden.
+    The init script also logs Potree's exported keys to the console so the
+    next error (if any) gives an exact diagnosis.
     """
-    colour_js = _POTREE_COLOUR_JS.get(colour_mode, _POTREE_COLOUR_JS["Elevation"])
-    edl_js    = "true" if edl_enabled else "false"
+    colour_js   = _POTREE_COLOUR_JS.get(colour_mode, _POTREE_COLOUR_JS["Elevation"])
+    edl_js      = "true" if edl_enabled else "false"
+    dep_scripts = "\n  ".join(f'<script src="{u}"></script>' for u in _DEPS)
 
     return f"""<!DOCTYPE html>
 <html>
@@ -241,23 +264,11 @@ def _potree_html(potree_url, assets_base, survey_name,
 
   <div id="error_overlay">
     <div class="title">⚠ Could not load point cloud</div>
-    <div class="detail" id="error_detail">Check the browser console for details.</div>
+    <div class="detail" id="error_detail">Check the browser console (F12) for details.</div>
   </div>
 
-  <!--
-    Load order is critical — all three must complete before the init script runs.
-
-    1. three.js r124   Potree 1.8.x is built against r124 specifically.
-                       window.THREE must exist before potree.js executes.
-                       NOT bundled in potree.js and NOT in lazylibs/ on R2.
-
-    2. jquery 3.6      Required by viewer.loadGUI() to build the Potree sidebar
-                       DOM panels (which we then immediately hide).
-
-    3. potree.js       Core Potree — registers Viewer, loadPointCloud, etc.
-  -->
-  <script src="{_THREE_CDN}"></script>
-  <script src="{_JQUERY_CDN}"></script>
+  <!-- All deps load before potree.js — matches heidentor.html order exactly -->
+  {dep_scripts}
   <script src="{assets_base}/potree.js"></script>
 
   <script>
@@ -271,14 +282,18 @@ def _potree_html(potree_url, assets_base, survey_name,
         console.error("[Potree]", msg);
     }}
 
-    if (typeof THREE === "undefined") {{
-        showError("THREE r124 failed to load from cdnjs.");
-    }} else if (typeof Potree === "undefined") {{
+    // Diagnostic dump — tells us exactly what potree.js exported
+    console.log("[Potree] THREE:", typeof THREE, typeof THREE !== "undefined" ? "r"+THREE.REVISION : "MISSING");
+    console.log("[Potree] TWEEN:", typeof TWEEN);
+    console.log("[Potree] Potree object:", typeof Potree);
+    if (typeof Potree === "object" || typeof Potree === "function") {{
+        console.log("[Potree] Potree keys:", Object.keys(Potree).join(", "));
+        console.log("[Potree] Potree.Viewer:", typeof Potree.Viewer);
+    }}
+
+    if (typeof Potree === "undefined") {{
         showError("Potree failed to load from R2.");
     }} else {{
-        console.log("[Potree] THREE r" + THREE.REVISION + " ✓");
-        console.log("[Potree] Potree.Viewer type:", typeof Potree.Viewer);
-
         try {{
             Potree.scriptPath = "{assets_base}";
 
@@ -577,24 +592,22 @@ def main():
                             format_func=_fmt_n,
                             help=(
                                 "Max points rendered at once. Potree streams "
-                                "progressively — this is a quality ceiling. "
-                                "Higher = more detail but slower first navigate."
+                                "progressively — higher = more detail but "
+                                "slower first navigate."
                             ),
                         )
                         edl_enabled = st.checkbox(
                             "Eye-dome lighting (EDL)", value=True,
                             help=(
                                 "Shading technique that gives strong depth "
-                                "perception. Each point is shaded based on its "
-                                "neighbours. Disable for flat rendering."
+                                "perception based on neighbouring points."
                             ),
                         )
                         colour_mode = st.selectbox(
                             "Colour by", ["Elevation", "Intensity"],
                             help=(
                                 "Elevation = rainbow height map. "
-                                "Intensity = laser return strength — almost "
-                                "photographic on hard surfaces."
+                                "Intensity = laser return strength."
                             ),
                         )
                         potree_settings = {
@@ -605,8 +618,7 @@ def main():
                     else:
                         point_size = st.slider(
                             "Point size", 1, 6, 2,
-                            help="Pixel size of each point. Increase for sparse "
-                                 "clouds; decrease if it looks blocky.",
+                            help="Pixel size of each point.",
                         )
                         for name in meta.get("layers", []):
                             visible_layers[name] = st.checkbox(
