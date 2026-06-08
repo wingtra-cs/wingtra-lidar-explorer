@@ -179,22 +179,17 @@ _POTREE_COLOUR_JS = {
 def _potree_html(potree_url, assets_base, survey_name,
                  point_budget, edl_enabled, colour_mode):
     """
-    Self-contained Potree viewer HTML.
+    Self-contained Potree 1.8.x viewer HTML.
 
-    Two fixes vs the previous version:
+    Key API note for Potree 1.8.x:
+        Potree.loadPointCloud is NOT available on the Potree namespace until
+        viewer.loadGUI() has completed its initialisation.  All examples in the
+        official 1.8.x distribution wrap loadPointCloud inside the loadGUI
+        callback.  The previous version called it at the top level which is why
+        "Potree.loadPointCloud is not a function" was thrown.
 
-    1.  Explicit Potree.scriptPath override — when potree.js is loaded
-        from a remote URL inside a Streamlit srcdoc iframe the auto-detection
-        via document.currentScript / document.scripts can silently fail,
-        leaving workers unresolvable and loadPointCloud hanging forever.
-
-    2.  Error overlay — if loadPointCloud throws (CORS block, 404, etc.) the
-        error is surfaced in the viewport rather than silently swallowed.
-        Open the browser console for full details.
-
-    CORS note: the Cloudflare R2 bucket CORS policy must allow AllowedOrigins: ["*"]
-    because srcdoc iframes have an opaque (null) origin that won't match
-    a wildcard subdomain pattern like https://*.streamlit.app.
+    After loadGUI() we immediately hide the sidebar it creates, since the
+    Streamlit sidebar handles all controls.
     """
     colour_js = _POTREE_COLOUR_JS.get(colour_mode, _POTREE_COLOUR_JS["Elevation"])
     edl_js    = "true" if edl_enabled else "false"
@@ -208,8 +203,11 @@ def _potree_html(potree_url, assets_base, survey_name,
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     html, body {{ width: 100%; height: 100%; overflow: hidden; background: #0c0c12; }}
     #potree_render_area {{ position: absolute; width: 100%; height: 100%; }}
+
+    /* Hide Potree's own sidebar/menu — Streamlit sidebar handles controls */
     #potree_sidebar_container {{ display: none !important; }}
     .potree_menu_toggle        {{ display: none !important; }}
+
     #loading_overlay {{
         position: absolute; top: 50%; left: 50%;
         transform: translate(-50%, -50%);
@@ -218,6 +216,7 @@ def _potree_html(potree_url, assets_base, survey_name,
     }}
     #loading_overlay .msg {{ font-size: 14px; color: #A3BABD; margin-bottom: 6px; }}
     #loading_overlay .sub {{ font-size: 12px; color: #4a5a60; }}
+
     #error_overlay {{
         display: none; position: absolute; top: 50%; left: 50%;
         transform: translate(-50%, -50%);
@@ -240,28 +239,11 @@ def _potree_html(potree_url, assets_base, survey_name,
 
   <div id="error_overlay">
     <div class="title">⚠ Could not load point cloud</div>
-    <div class="detail" id="error_detail">
-      Check the browser console for details.<br>
-      Most likely cause: R2 CORS policy — set AllowedOrigins to ["*"].
-    </div>
+    <div class="detail" id="error_detail">Check the browser console for details.</div>
   </div>
 
   <script src="{assets_base}/potree.js"></script>
   <script>
-    // ── Fix 1: Explicit scriptPath ──────────────────────────────────────────
-    // Potree auto-detects its base path from document.currentScript or by
-    // scanning document.scripts.  Inside a Streamlit srcdoc iframe both can
-    // silently return null / wrong values, leaving workers unresolvable.
-    // Setting it explicitly here is the safe fallback.
-    try {{
-        if (typeof Potree !== "undefined") {{
-            Potree.scriptPath = "{assets_base}";
-        }}
-    }} catch(e) {{
-        console.warn("[Potree] could not set scriptPath:", e);
-    }}
-
-    // ── Helper: show the error overlay ────────────────────────────────────
     function showError(msg) {{
         const lo = document.getElementById("loading_overlay");
         const eo = document.getElementById("error_overlay");
@@ -272,7 +254,15 @@ def _potree_html(potree_url, assets_base, survey_name,
         console.error("[Potree]", msg);
     }}
 
-    // ── Viewer setup ───────────────────────────────────────────────────────
+    // Set scriptPath explicitly before any Potree calls
+    try {{
+        if (typeof Potree !== "undefined") {{
+            Potree.scriptPath = "{assets_base}";
+        }}
+    }} catch(e) {{
+        console.warn("[Potree] could not set scriptPath:", e);
+    }}
+
     let viewer;
     try {{
         viewer = new Potree.Viewer(
@@ -288,35 +278,45 @@ def _potree_html(potree_url, assets_base, survey_name,
         showError("Viewer init failed: " + e);
     }}
 
-    // ── Load point cloud ───────────────────────────────────────────────────
+    // ── Potree 1.8.x API: loadPointCloud must be called inside viewer.loadGUI()
+    // ── At the top level, Potree.loadPointCloud is not yet registered on the
+    // ── namespace — this was the cause of the "not a function" error.
     const pcURL = "{potree_url}";
-    console.log("[Potree] scriptPath →", (typeof Potree !== "undefined" ? Potree.scriptPath : "N/A"));
+    console.log("[Potree] scriptPath →", Potree.scriptPath || "not set");
     console.log("[Potree] loading    →", pcURL);
 
-    try {{
-        Potree.loadPointCloud(
-            pcURL,
-            "{survey_name}",
-            e => {{
-                console.log("[Potree] callback fired — pointcloud loaded");
-                const lo = document.getElementById("loading_overlay");
-                if (lo) lo.style.display = "none";
+    viewer.loadGUI(() => {{
+        // loadGUI creates the Potree sidebar — immediately suppress it
+        const sidebar = document.getElementById("potree_sidebar_container");
+        if (sidebar) sidebar.style.setProperty("display", "none", "important");
+        const toggle  = document.querySelector(".potree_menu_toggle");
+        if (toggle)  toggle.style.setProperty("display",  "none", "important");
 
-                const pointcloud = e.pointcloud;
-                const material   = pointcloud.material;
+        try {{
+            Potree.loadPointCloud(
+                pcURL,
+                "{survey_name}",
+                e => {{
+                    console.log("[Potree] point cloud loaded successfully");
+                    const lo = document.getElementById("loading_overlay");
+                    if (lo) lo.style.display = "none";
 
-                {colour_js}
+                    const pointcloud = e.pointcloud;
+                    const material   = pointcloud.material;
 
-                material.size          = 1;
-                material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+                    {colour_js}
 
-                viewer.scene.addPointCloud(pointcloud);
-                viewer.fitToScreen();
-            }}
-        );
-    }} catch(e) {{
-        showError("loadPointCloud threw: " + e);
-    }}
+                    material.size          = 1;
+                    material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+
+                    viewer.scene.addPointCloud(pointcloud);
+                    viewer.fitToScreen();
+                }}
+            );
+        }} catch(e) {{
+            showError("loadPointCloud threw: " + e);
+        }}
+    }});
   </script>
 </body>
 </html>"""
@@ -328,9 +328,7 @@ def render_potree_viewer(bundle, potree_settings):
     r2_public  = st.secrets.get("r2_public_url", "").rstrip("/")
 
     if not r2_public:
-        st.warning(
-            "**r2_public_url** not set in secrets — falling back to PyDeck view."
-        )
+        st.warning("**r2_public_url** not set in secrets — falling back to PyDeck view.")
         render_point_cloud(bundle, {}, 2)
         return
 
