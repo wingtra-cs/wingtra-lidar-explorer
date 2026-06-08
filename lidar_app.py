@@ -269,6 +269,7 @@ def _potree_html(potree_url, assets_base, survey_name,
 
   <!-- All deps load before potree.js — matches heidentor.html order exactly -->
   {dep_scripts}
+  <script src="{assets_base}/libs/other/BinaryHeap.js"></script>
   <script src="{assets_base}/potree.js"></script>
 
   <script>
