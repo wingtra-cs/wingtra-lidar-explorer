@@ -142,6 +142,15 @@ _CDN_DEPS = [
 
 def _potree_html(potree_url, assets_base, survey_name,
                  point_budget, edl_enabled, colour_mode):
+    """Potree 1.8.x viewer HTML — all fixes incorporated.
+
+    Key insight: viewer.loadGUI() was blocking because it tries to load
+    sidebar.html from R2 via AJAX in the srcdoc iframe, and the callback
+    never fires. But loadGUI is NOT needed — Potree.loadPointCloud is
+    already on the namespace (confirmed via the keys dump). Since we hide
+    the sidebar anyway, skipping loadGUI entirely is both simpler and
+    avoids the hang.
+    """
     colour_js = _POTREE_COLOUR_JS.get(colour_mode, _POTREE_COLOUR_JS["Elevation"])
     edl_js    = "true" if edl_enabled else "false"
     dep_tags  = "\n".join(f'<script src="{u}"></script>' for u in _CDN_DEPS)
@@ -179,15 +188,8 @@ html,body{{width:100%;height:100%;overflow:hidden;background:#0c0c12}}
 </div>
 
 <!-- ═══ 1. Worker monkey-patch ════════════════════════════════════════════
-     In a Streamlit srcdoc iframe, window.location.origin is the string "null".
-     Browsers silently refuse to run cross-origin Workers from a null origin —
-     new Worker(url) succeeds but the worker never executes its script.
-     The previous try/catch approach didn't work because Chrome doesn't THROW;
-     it just silently fails.
-
-     Fix: detect the null-origin context and ALWAYS use the blob fallback —
-     fetch the script via XHR (CORS is fine), rewrite relative importScripts
-     to absolute URLs, create the Worker from a Blob URL.  ═══════════════ -->
+     srcdoc iframe → origin "null" → Workers silently fail.
+     Detect null origin, always use blob fallback. ════════════════════════ -->
 <script>
 (function(){{
   var _W=window.Worker;
@@ -223,7 +225,11 @@ html,body{{width:100%;height:100%;overflow:hidden;background:#0c0c12}}
 <!-- ═══ 4. Potree core ════════════════════════════════════════════════════ -->
 <script src="{assets_base}/potree.js"></script>
 
-<!-- ═══ 5. Viewer init ════════════════════════════════════════════════════ -->
+<!-- ═══ 5. Viewer init ════════════════════════════════════════════════════
+     No loadGUI() — it tries to AJAX-load sidebar.html from R2 and hangs
+     in the srcdoc iframe. Potree.loadPointCloud is already on the namespace
+     (confirmed from the keys dump), so we call it directly. We never wanted
+     the Potree sidebar anyway — the Streamlit sidebar handles everything. -->
 <script>
 function showError(msg){{
   var lo=document.getElementById("loading_overlay");
@@ -239,6 +245,7 @@ console.log("[Potree] THREE:",typeof THREE,typeof THREE!=="undefined"?"r"+THREE.
 console.log("[Potree] TWEEN:",typeof TWEEN);
 console.log("[Potree] BinaryHeap:",typeof BinaryHeap);
 console.log("[Potree] Potree.Viewer:",typeof Potree!=="undefined"?typeof Potree.Viewer:"N/A");
+console.log("[Potree] Potree.loadPointCloud:",typeof Potree!=="undefined"?typeof Potree.loadPointCloud:"N/A");
 console.log("[Potree] origin:",window.location.origin,"(forceBlob:"+(window.location.origin==="null")+")");
 
 if(typeof Potree==="undefined"){{showError("Potree failed to load.");}}
@@ -248,7 +255,7 @@ else{{
 
   function _awaitSize(){{
     if(el.clientWidth>0 && el.clientHeight>0){{
-      console.log("[Potree] container size:",el.clientWidth,"x",el.clientHeight);
+      console.log("[Potree] container:",el.clientWidth,"x",el.clientHeight);
       _initViewer();
     }}
     else{{ requestAnimationFrame(_awaitSize); }}
@@ -259,6 +266,8 @@ else{{
       Potree.scriptPath="{assets_base}";
 
       var viewer=new Potree.Viewer(el);
+      console.log("[Potree] Viewer created ✓");
+
       viewer.setEDLEnabled({edl_js});
       viewer.setEDLRadius(1.4);
       viewer.setEDLStrength(0.4);
@@ -267,34 +276,25 @@ else{{
       viewer.setFOV(60);
 
       var pcURL="{potree_url}";
-      console.log("[Potree] loading →",pcURL);
+      console.log("[Potree] calling loadPointCloud →",pcURL);
 
-      viewer.loadGUI(function(){{
-        console.log("[Potree] loadGUI callback fired");
-        var sb=document.getElementById("potree_sidebar_container");
-        if(sb)sb.style.setProperty("display","none","important");
-        var mt=document.querySelector(".potree_menu_toggle");
-        if(mt)mt.style.setProperty("display","none","important");
+      Potree.loadPointCloud(pcURL,"{survey_name}",function(e){{
+        console.log("[Potree] ✓ point cloud loaded, adding to scene");
+        var lo=document.getElementById("loading_overlay");
+        if(lo)lo.style.display="none";
 
-        try{{
-          Potree.loadPointCloud(pcURL,"{survey_name}",function(e){{
-            console.log("[Potree] point cloud loaded ✓");
-            var lo=document.getElementById("loading_overlay");
-            if(lo)lo.style.display="none";
+        var pc=e.pointcloud;
+        var material=pc.material;
+        {colour_js}
+        material.size=1;
+        material.pointSizeType=Potree.PointSizeType.ADAPTIVE;
 
-            var pc=e.pointcloud;
-            var material=pc.material;
-            {colour_js}
-            material.size=1;
-            material.pointSizeType=Potree.PointSizeType.ADAPTIVE;
-
-            viewer.scene.addPointCloud(pc);
-            viewer.fitToScreen();
-          }});
-        }}catch(e2){{showError("loadPointCloud: "+e2);}}
+        viewer.scene.addPointCloud(pc);
+        viewer.fitToScreen();
+        console.log("[Potree] ✓ rendering");
       }});
 
-    }}catch(e){{showError("Viewer init: "+e);}}
+    }}catch(e){{showError("Init failed: "+e);}}
   }}
 
   _awaitSize();
