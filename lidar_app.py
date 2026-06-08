@@ -5,11 +5,11 @@ Password-protected Streamlit app for visualising WingtraRay LIDAR surveys.
 
 Secrets (.streamlit/secrets.toml):
     app_password   = "..."
-    r2_public_url  = "https://pub-<hash>.r2.dev"   # public R2 dev URL for Potree
+    r2_public_url  = "https://pub-<hash>.r2.dev"
 
     [r2]
     account_id = "..."
-    access_key = "..."     # read-only (parquet / npy / meta via presigned URLs)
+    access_key = "..."     # read-only
     secret_key = "..."
     bucket     = "ptpn-bucket"
 """
@@ -41,7 +41,6 @@ SUN_ORANGE = "#F46F29"
 CSS = f"""
 <style>
   .stApp {{ background-color: {URANUS0}; }}
-
   section[data-testid="stSidebar"] {{ background-color: {MERCURY500}; }}
   section[data-testid="stSidebar"] * {{ color: #FFFFFF; }}
   section[data-testid="stSidebar"] input,
@@ -53,13 +52,11 @@ CSS = f"""
   div[data-baseweb="popover"] ul, ul[role="listbox"] {{ background-color: #233A44; }}
   div[data-baseweb="popover"] li, ul[role="listbox"] li {{ color: #FFFFFF; }}
   ul[role="listbox"] li:hover {{ background-color: #16242B; }}
-
   section[data-testid="stSidebar"] [data-testid="stTooltipHoverTarget"],
   section[data-testid="stSidebar"] [data-testid="stTooltipHoverTarget"] svg,
   section[data-testid="stSidebar"] [data-testid="stTooltipHoverTarget"] svg * {{
       color: {URANUS300} !important; fill: {URANUS300} !important;
       stroke: {URANUS300} !important; opacity: 1 !important; }}
-
   section[data-testid="stSidebar"] button[kind="secondary"],
   section[data-testid="stSidebar"] [data-testid="baseButton-secondary"] {{
       background-color: #16242B !important;
@@ -68,7 +65,6 @@ CSS = f"""
   section[data-testid="stSidebar"] .stLinkButton a {{
       background-color: #16242B !important;
       border: 1px solid #3A4F59 !important; color: #FFFFFF !important; }}
-
   .wingtra-header {{
       display: flex; align-items: center; gap: 18px;
       background-color: {MERCURY600}; border-bottom: 3px solid {SUN_ORANGE};
@@ -77,12 +73,10 @@ CSS = f"""
   .wingtra-wordmark {{ color: {SUN_ORANGE}; font-size: 28px; font-weight: 800; letter-spacing: .5px; }}
   .wingtra-title {{ color: #FFFFFF; font-size: 20px; font-weight: 800; line-height: 1.2; }}
   .wingtra-subtitle {{ color: {URANUS300}; font-size: 12.5px; font-weight: 500; }}
-
   div[data-testid="stMetric"] {{
       background: #FFFFFF; border: 1px solid #D7E0E2; border-radius: 12px;
       padding: 12px 16px; box-shadow: 0 1px 3px rgba(28,46,54,0.06); }}
   div[data-testid="stMetricLabel"] p {{ color: #5b6b72; font-weight: 600; }}
-
   .wingtra-card {{
       max-width: 680px; margin: 32px auto 0; padding: 28px 32px;
       background: #FFFFFF; border: 1px solid #D7E0E2; border-radius: 14px;
@@ -90,13 +84,6 @@ CSS = f"""
   .wingtra-card-title {{ color: {MERCURY600}; font-size: 20px; font-weight: 800; margin-bottom: 8px; }}
   .wingtra-card p, .wingtra-card li {{ color: #46555b; font-size: 14px; line-height: 1.6; }}
   .wingtra-card ul {{ margin: 10px 0 0; padding-left: 22px; }}
-
-  /* Badge shown in Point Cloud tab header when Potree is active */
-  .potree-badge {{
-      display: inline-block; background: {SUN_ORANGE}; color: #fff;
-      font-size: 10px; font-weight: 700; letter-spacing: .5px;
-      padding: 2px 7px; border-radius: 4px; margin-left: 8px;
-      vertical-align: middle; text-transform: uppercase; }}
 </style>
 """
 
@@ -175,7 +162,7 @@ def _vivid_colors(z_vals):
 
 
 # --------------------------------------------------------------------------- #
-#  Potree viewer (Phase 3)
+#  Potree viewer
 # --------------------------------------------------------------------------- #
 _POTREE_COLOUR_JS = {
     "Elevation": """
@@ -191,10 +178,26 @@ _POTREE_COLOUR_JS = {
 
 def _potree_html(potree_url, assets_base, survey_name,
                  point_budget, edl_enabled, colour_mode):
-    """Generate a self-contained Potree viewer HTML page."""
-    colour_js = _POTREE_COLOUR_JS.get(colour_mode,
-                    _POTREE_COLOUR_JS["Elevation"])
-    edl_js = "true" if edl_enabled else "false"
+    """
+    Self-contained Potree viewer HTML.
+
+    Two fixes vs the previous version:
+
+    1.  Explicit Potree.scriptPath override — when potree.js is loaded
+        from a remote URL inside a Streamlit srcdoc iframe the auto-detection
+        via document.currentScript / document.scripts can silently fail,
+        leaving workers unresolvable and loadPointCloud hanging forever.
+
+    2.  Error overlay — if loadPointCloud throws (CORS block, 404, etc.) the
+        error is surfaced in the viewport rather than silently swallowed.
+        Open the browser console for full details.
+
+    CORS note: the Cloudflare R2 bucket CORS policy must allow AllowedOrigins: ["*"]
+    because srcdoc iframes have an opaque (null) origin that won't match
+    a wildcard subdomain pattern like https://*.streamlit.app.
+    """
+    colour_js = _POTREE_COLOUR_JS.get(colour_mode, _POTREE_COLOUR_JS["Elevation"])
+    edl_js    = "true" if edl_enabled else "false"
 
     return f"""<!DOCTYPE html>
 <html>
@@ -205,12 +208,8 @@ def _potree_html(potree_url, assets_base, survey_name,
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     html, body {{ width: 100%; height: 100%; overflow: hidden; background: #0c0c12; }}
     #potree_render_area {{ position: absolute; width: 100%; height: 100%; }}
-
-    /* Hide Potree's own sidebar and menu — we use the Streamlit sidebar */
     #potree_sidebar_container {{ display: none !important; }}
     .potree_menu_toggle        {{ display: none !important; }}
-
-    /* Loading overlay */
     #loading_overlay {{
         position: absolute; top: 50%; left: 50%;
         transform: translate(-50%, -50%);
@@ -219,48 +218,105 @@ def _potree_html(potree_url, assets_base, survey_name,
     }}
     #loading_overlay .msg {{ font-size: 14px; color: #A3BABD; margin-bottom: 6px; }}
     #loading_overlay .sub {{ font-size: 12px; color: #4a5a60; }}
+    #error_overlay {{
+        display: none; position: absolute; top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        font-family: -apple-system, sans-serif; text-align: center;
+        max-width: 480px; padding: 0 20px;
+    }}
+    #error_overlay .title  {{ font-size: 14px; font-weight: 700;
+                               color: #F46F29; margin-bottom: 8px; }}
+    #error_overlay .detail {{ font-size: 11px; color: #6a7880;
+                               word-break: break-all; }}
   </style>
 </head>
 <body>
   <div id="potree_render_area"></div>
+
   <div id="loading_overlay">
     <div class="msg">Loading LIDAR point cloud…</div>
     <div class="sub">Streaming tiles from cloud storage</div>
   </div>
 
+  <div id="error_overlay">
+    <div class="title">⚠ Could not load point cloud</div>
+    <div class="detail" id="error_detail">
+      Check the browser console for details.<br>
+      Most likely cause: R2 CORS policy — set AllowedOrigins to ["*"].
+    </div>
+  </div>
+
   <script src="{assets_base}/potree.js"></script>
   <script>
-    const viewer = new Potree.Viewer(
-        document.getElementById("potree_render_area")
-    );
-
-    viewer.setEDLEnabled({edl_js});
-    viewer.setEDLRadius(1.4);
-    viewer.setEDLStrength(0.4);
-    viewer.setPointBudget({point_budget});
-    viewer.setBackground("black");
-    viewer.setFOV(60);
-
-    Potree.loadPointCloud(
-        "{potree_url}",
-        "{survey_name}",
-        e => {{
-            // Hide loading overlay once the first tiles arrive
-            const overlay = document.getElementById("loading_overlay");
-            if (overlay) overlay.style.display = "none";
-
-            const pointcloud = e.pointcloud;
-            const material   = pointcloud.material;
-
-            {colour_js}
-
-            material.size          = 1;
-            material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
-
-            viewer.scene.addPointCloud(pointcloud);
-            viewer.fitToScreen();
+    // ── Fix 1: Explicit scriptPath ──────────────────────────────────────────
+    // Potree auto-detects its base path from document.currentScript or by
+    // scanning document.scripts.  Inside a Streamlit srcdoc iframe both can
+    // silently return null / wrong values, leaving workers unresolvable.
+    // Setting it explicitly here is the safe fallback.
+    try {{
+        if (typeof Potree !== "undefined") {{
+            Potree.scriptPath = "{assets_base}";
         }}
-    );
+    }} catch(e) {{
+        console.warn("[Potree] could not set scriptPath:", e);
+    }}
+
+    // ── Helper: show the error overlay ────────────────────────────────────
+    function showError(msg) {{
+        const lo = document.getElementById("loading_overlay");
+        const eo = document.getElementById("error_overlay");
+        const ed = document.getElementById("error_detail");
+        if (lo) lo.style.display = "none";
+        if (ed) ed.textContent   = String(msg);
+        if (eo) eo.style.display = "block";
+        console.error("[Potree]", msg);
+    }}
+
+    // ── Viewer setup ───────────────────────────────────────────────────────
+    let viewer;
+    try {{
+        viewer = new Potree.Viewer(
+            document.getElementById("potree_render_area")
+        );
+        viewer.setEDLEnabled({edl_js});
+        viewer.setEDLRadius(1.4);
+        viewer.setEDLStrength(0.4);
+        viewer.setPointBudget({point_budget});
+        viewer.setBackground("black");
+        viewer.setFOV(60);
+    }} catch(e) {{
+        showError("Viewer init failed: " + e);
+    }}
+
+    // ── Load point cloud ───────────────────────────────────────────────────
+    const pcURL = "{potree_url}";
+    console.log("[Potree] scriptPath →", (typeof Potree !== "undefined" ? Potree.scriptPath : "N/A"));
+    console.log("[Potree] loading    →", pcURL);
+
+    try {{
+        Potree.loadPointCloud(
+            pcURL,
+            "{survey_name}",
+            e => {{
+                console.log("[Potree] callback fired — pointcloud loaded");
+                const lo = document.getElementById("loading_overlay");
+                if (lo) lo.style.display = "none";
+
+                const pointcloud = e.pointcloud;
+                const material   = pointcloud.material;
+
+                {colour_js}
+
+                material.size          = 1;
+                material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+
+                viewer.scene.addPointCloud(pointcloud);
+                viewer.fitToScreen();
+            }}
+        );
+    }} catch(e) {{
+        showError("loadPointCloud threw: " + e);
+    }}
   </script>
 </body>
 </html>"""
@@ -268,14 +324,12 @@ def _potree_html(potree_url, assets_base, survey_name,
 
 def render_potree_viewer(bundle, potree_settings):
     """Render the Potree point cloud viewer inside a Streamlit iframe."""
-    meta        = bundle["meta"]
-    r2_public   = st.secrets.get("r2_public_url", "").rstrip("/")
+    meta       = bundle["meta"]
+    r2_public  = st.secrets.get("r2_public_url", "").rstrip("/")
 
     if not r2_public:
         st.warning(
-            "**r2_public_url** is not set in secrets — "
-            "falling back to the downsampled PyDeck view. "
-            "Add `r2_public_url = \"https://pub-<hash>.r2.dev\"` to your secrets."
+            "**r2_public_url** not set in secrets — falling back to PyDeck view."
         )
         render_point_cloud(bundle, {}, 2)
         return
@@ -297,10 +351,10 @@ def render_potree_viewer(bundle, potree_settings):
     components.html(html, height=650, scrolling=False)
 
     cols = st.columns(4)
-    cols[0].metric("Total points",   _fmt_n(meta.get("n_total", 0)))
-    cols[1].metric("Elevation min",  f"{meta.get('z_min', 0):.1f} m")
-    cols[2].metric("Elevation max",  f"{meta.get('z_max', 0):.1f} m")
-    cols[3].metric("Point budget",   _fmt_n(potree_settings["point_budget"]))
+    cols[0].metric("Total points",  _fmt_n(meta.get("n_total", 0)))
+    cols[1].metric("Elevation min", f"{meta.get('z_min', 0):.1f} m")
+    cols[2].metric("Elevation max", f"{meta.get('z_max', 0):.1f} m")
+    cols[3].metric("Point budget",  _fmt_n(potree_settings["point_budget"]))
 
     edl_str = "EDL on" if potree_settings["edl_enabled"] else "EDL off"
     st.caption(
@@ -311,7 +365,7 @@ def render_potree_viewer(bundle, potree_settings):
 
 
 # --------------------------------------------------------------------------- #
-#  PyDeck point cloud (fallback / surveys without Potree tiles)
+#  PyDeck point cloud (fallback)
 # --------------------------------------------------------------------------- #
 _LIGHTING_EFFECT = {
     "@@type": "LightingEffect",
@@ -370,8 +424,7 @@ def render_point_cloud(bundle, visible_layers, point_size):
 
     st.caption(
         f"Downsampled LIDAR · {_fmt_n(n_display)} display pts from "
-        f"{_fmt_n(meta.get('n_total', 0))} raw · colours = elevation · "
-        "large surveys may take a few seconds to fully render"
+        f"{_fmt_n(meta.get('n_total', 0))} raw · colours = elevation"
     )
 
 
@@ -406,8 +459,8 @@ def render_dtm(bundle, vert_exag, colorscale):
     lats = np.linspace(bounds["lat_max"], bounds["lat_min"], nrows)
     x_m  = (lons - lon0) * m_lon
     y_m  = (lats - lat0) * m_lat
+    z_pl = dtm * vert_exag
 
-    z_pl      = dtm * vert_exag
     span_x    = float(x_m.max() - x_m.min())
     span_y    = float(y_m.max() - y_m.min())
     span_z    = (z_max_disp - z_min_disp) * vert_exag
@@ -470,14 +523,13 @@ def main():
 
     render_header()
 
-    # Defaults — overwritten in the sidebar block when a survey is picked
-    bundle         = None
-    visible_layers = {}
-    point_size     = 2
-    vert_exag      = 1.0
-    colorscale     = "Turbo"
-    picked         = PLACEHOLDER
-    potree_settings = None   # None = use PyDeck fallback
+    bundle          = None
+    visible_layers  = {}
+    point_size      = 2
+    vert_exag       = 1.0
+    colorscale      = "Turbo"
+    picked          = PLACEHOLDER
+    potree_settings = None
 
     with st.sidebar:
         st.header("Survey")
@@ -506,11 +558,9 @@ def main():
                     r2_public  = st.secrets.get("r2_public_url", "").strip()
                     use_potree = meta.get("potree_available", False) and bool(r2_public)
 
-                    # ---- Point cloud controls ----------------------------- #
                     st.header("Point cloud")
 
                     if use_potree:
-                        # Potree mode — progressive full-res streaming
                         point_budget = st.select_slider(
                             "Point budget",
                             options=[500_000, 1_000_000, 2_000_000,
@@ -518,28 +568,25 @@ def main():
                             value=1_000_000,
                             format_func=_fmt_n,
                             help=(
-                                "Maximum points rendered at once. Potree streams "
-                                "progressively — this is a quality ceiling, not a "
-                                "hard cap on what's loaded. Higher = more detail "
-                                "but slower on first navigate."
+                                "Max points rendered at once. Potree streams "
+                                "progressively — this is a quality ceiling. "
+                                "Higher = more detail but slower first navigate."
                             ),
                         )
                         edl_enabled = st.checkbox(
                             "Eye-dome lighting (EDL)", value=True,
                             help=(
                                 "Shading technique that gives strong depth "
-                                "perception — each point is shaded based on its "
-                                "neighbours. Disable for flat, unshaded rendering."
+                                "perception. Each point is shaded based on its "
+                                "neighbours. Disable for flat rendering."
                             ),
                         )
                         colour_mode = st.selectbox(
-                            "Colour by",
-                            ["Elevation", "Intensity"],
+                            "Colour by", ["Elevation", "Intensity"],
                             help=(
                                 "Elevation = rainbow height map. "
-                                "Intensity = laser return strength — "
-                                "gives an almost photographic view where hard "
-                                "surfaces (roads, bare soil) appear bright."
+                                "Intensity = laser return strength — almost "
+                                "photographic on hard surfaces."
                             ),
                         )
                         potree_settings = {
@@ -547,39 +594,32 @@ def main():
                             "edl_enabled":  edl_enabled,
                             "colour_mode":  colour_mode,
                         }
-
                     else:
-                        # PyDeck fallback — downsampled parquet
                         point_size = st.slider(
                             "Point size", 1, 6, 2,
-                            help="Pixel size of each rendered point. Increase for "
-                                 "sparse clouds; decrease if it looks blocky.",
+                            help="Pixel size of each point. Increase for sparse "
+                                 "clouds; decrease if it looks blocky.",
                         )
                         for name in meta.get("layers", []):
                             visible_layers[name] = st.checkbox(
                                 _layer_label(name), value=True)
-
                         if not meta.get("potree_available"):
                             st.caption(
                                 "💡 Run PotreeConverter + upload tiles to enable "
-                                "the full-res Potree viewer for this survey."
+                                "the full-res viewer for this survey."
                             )
 
-                    # ---- Terrain model controls -------------------------- #
                     if bundle["dtm"] is not None:
                         st.header("Terrain model")
                         vert_exag = st.slider(
                             "Vertical exaggeration", 0.5, 5.0, 1.0, step=0.5,
-                            help="Multiplies elevation values to amplify relief. "
-                                 "1.0 = true scale. Try 2–3× for flat terrain.",
+                            help="1.0 = true scale. Try 2–3× for flat terrain.",
                         )
                         colorscale = st.selectbox(
                             "Colorscale", DTM_COLORSCALES, index=0,
-                            help="Turbo = most vivid. Viridis/Plasma = "
-                                 "perceptually uniform.",
+                            help="Turbo = most vivid. Viridis = perceptually uniform.",
                         )
 
-                    # ---- Info -------------------------------------------- #
                     st.header("Info")
                     viewer_mode = "Potree (full res)" if use_potree else "PyDeck (downsampled)"
                     st.markdown(
@@ -591,7 +631,6 @@ def main():
                         f"{'Included' if meta.get('dtm_available') else 'Not available'}"
                     )
 
-                    # ---- Downloads --------------------------------------- #
                     st.header("Downloads")
                     raw_las_key = meta.get("raw_las_key")
                     raw_dtm_key = meta.get("raw_dtm_key")
@@ -620,7 +659,6 @@ def main():
             if st.button("⟳ Refresh surveys"):
                 refresh_surveys(); st.rerun()
 
-    # ---- Main area: empty state ------------------------------------------ #
     if picked == PLACEHOLDER or bundle is None:
         st.markdown(
             """<div class="wingtra-card">
@@ -638,13 +676,6 @@ def main():
         )
         st.stop()
 
-    # ---- Tabs ------------------------------------------------------------ #
-    use_potree  = potree_settings is not None
-    cloud_label = (
-        "☁  Point Cloud"
-        + (' <span class="potree-badge">Potree</span>' if use_potree else "")
-    )
-
     tab_labels = ["☁  Point Cloud"]
     if bundle["dtm"] is not None:
         tab_labels.append("⛰  Terrain Model")
@@ -652,7 +683,7 @@ def main():
     tabs = st.tabs(tab_labels)
 
     with tabs[0]:
-        if use_potree:
+        if potree_settings is not None:
             render_potree_viewer(bundle, potree_settings)
         else:
             render_point_cloud(bundle, visible_layers, point_size)
