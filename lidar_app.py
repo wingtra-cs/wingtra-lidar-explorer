@@ -181,15 +181,18 @@ def _potree_html(potree_url, assets_base, survey_name,
     """
     Self-contained Potree 1.8.x viewer HTML.
 
-    Key API note for Potree 1.8.x:
-        Potree.loadPointCloud is NOT available on the Potree namespace until
-        viewer.loadGUI() has completed its initialisation.  All examples in the
-        official 1.8.x distribution wrap loadPointCloud inside the loadGUI
-        callback.  The previous version called it at the top level which is why
-        "Potree.loadPointCloud is not a function" was thrown.
+    Dependency load order (critical):
+        1. Three.js  — from lazylibs/ in the R2 bucket (already uploaded).
+                       potree.js expects window.THREE to exist before it runs.
+        2. jQuery    — required by viewer.loadGUI() which initialises the
+                       Potree sidebar DOM. Without it, loadGUI throws and
+                       Potree.loadPointCloud is never registered.
+        3. potree.js — Potree core; sets up Potree.Viewer, loadPointCloud, etc.
 
-    After loadGUI() we immediately hide the sidebar it creates, since the
-    Streamlit sidebar handles all controls.
+    Then: new Potree.Viewer() → viewer.loadGUI() → Potree.loadPointCloud()
+
+    The Potree sidebar created by loadGUI is immediately suppressed — we use
+    the Streamlit sidebar for all controls.
     """
     colour_js = _POTREE_COLOUR_JS.get(colour_mode, _POTREE_COLOUR_JS["Elevation"])
     edl_js    = "true" if edl_enabled else "false"
@@ -203,25 +206,21 @@ def _potree_html(potree_url, assets_base, survey_name,
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     html, body {{ width: 100%; height: 100%; overflow: hidden; background: #0c0c12; }}
     #potree_render_area {{ position: absolute; width: 100%; height: 100%; }}
-
-    /* Hide Potree's own sidebar/menu — Streamlit sidebar handles controls */
     #potree_sidebar_container {{ display: none !important; }}
     .potree_menu_toggle        {{ display: none !important; }}
-
     #loading_overlay {{
         position: absolute; top: 50%; left: 50%;
         transform: translate(-50%, -50%);
         font-family: -apple-system, sans-serif; text-align: center;
-        pointer-events: none;
+        pointer-events: none; z-index: 10;
     }}
     #loading_overlay .msg {{ font-size: 14px; color: #A3BABD; margin-bottom: 6px; }}
     #loading_overlay .sub {{ font-size: 12px; color: #4a5a60; }}
-
     #error_overlay {{
         display: none; position: absolute; top: 50%; left: 50%;
         transform: translate(-50%, -50%);
         font-family: -apple-system, sans-serif; text-align: center;
-        max-width: 480px; padding: 0 20px;
+        max-width: 480px; padding: 0 20px; z-index: 10;
     }}
     #error_overlay .title  {{ font-size: 14px; font-weight: 700;
                                color: #F46F29; margin-bottom: 8px; }}
@@ -242,7 +241,19 @@ def _potree_html(potree_url, assets_base, survey_name,
     <div class="detail" id="error_detail">Check the browser console for details.</div>
   </div>
 
+  <!--
+    Dependency load order — all three must be present before the init script:
+      1. three.js  — window.THREE global required by potree.js internals
+      2. jquery    — required by viewer.loadGUI() to build its DOM panels
+      3. potree.js — Potree core (Viewer, loadPointCloud, Gradients, etc.)
+
+    three.js lives in lazylibs/ inside the same potree-assets upload.
+    jquery is loaded from cdnjs (not bundled in the Potree 1.8.x build).
+  -->
+  <script src="{assets_base}/lazylibs/three.js/build/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.4/jquery.min.js"></script>
   <script src="{assets_base}/potree.js"></script>
+
   <script>
     function showError(msg) {{
         const lo = document.getElementById("loading_overlay");
@@ -254,69 +265,65 @@ def _potree_html(potree_url, assets_base, survey_name,
         console.error("[Potree]", msg);
     }}
 
-    // Set scriptPath explicitly before any Potree calls
-    try {{
-        if (typeof Potree !== "undefined") {{
-            Potree.scriptPath = "{assets_base}";
-        }}
-    }} catch(e) {{
-        console.warn("[Potree] could not set scriptPath:", e);
-    }}
-
-    let viewer;
-    try {{
-        viewer = new Potree.Viewer(
-            document.getElementById("potree_render_area")
-        );
-        viewer.setEDLEnabled({edl_js});
-        viewer.setEDLRadius(1.4);
-        viewer.setEDLStrength(0.4);
-        viewer.setPointBudget({point_budget});
-        viewer.setBackground("black");
-        viewer.setFOV(60);
-    }} catch(e) {{
-        showError("Viewer init failed: " + e);
-    }}
-
-    // ── Potree 1.8.x API: loadPointCloud must be called inside viewer.loadGUI()
-    // ── At the top level, Potree.loadPointCloud is not yet registered on the
-    // ── namespace — this was the cause of the "not a function" error.
-    const pcURL = "{potree_url}";
-    console.log("[Potree] scriptPath →", Potree.scriptPath || "not set");
-    console.log("[Potree] loading    →", pcURL);
-
-    viewer.loadGUI(() => {{
-        // loadGUI creates the Potree sidebar — immediately suppress it
-        const sidebar = document.getElementById("potree_sidebar_container");
-        if (sidebar) sidebar.style.setProperty("display", "none", "important");
-        const toggle  = document.querySelector(".potree_menu_toggle");
-        if (toggle)  toggle.style.setProperty("display",  "none", "important");
+    // Confirm THREE and Potree loaded before proceeding
+    if (typeof THREE === "undefined") {{
+        showError("THREE.js failed to load from lazylibs/ — check R2 path.");
+    }} else if (typeof Potree === "undefined") {{
+        showError("Potree failed to load — check potree.js in R2.");
+    }} else {{
+        console.log("[Potree] THREE r" + THREE.REVISION + " loaded");
+        console.log("[Potree] Potree loaded, Viewer:", typeof Potree.Viewer);
 
         try {{
-            Potree.loadPointCloud(
-                pcURL,
-                "{survey_name}",
-                e => {{
-                    console.log("[Potree] point cloud loaded successfully");
-                    const lo = document.getElementById("loading_overlay");
-                    if (lo) lo.style.display = "none";
+            Potree.scriptPath = "{assets_base}";
 
-                    const pointcloud = e.pointcloud;
-                    const material   = pointcloud.material;
-
-                    {colour_js}
-
-                    material.size          = 1;
-                    material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
-
-                    viewer.scene.addPointCloud(pointcloud);
-                    viewer.fitToScreen();
-                }}
+            const viewer = new Potree.Viewer(
+                document.getElementById("potree_render_area")
             );
+            viewer.setEDLEnabled({edl_js});
+            viewer.setEDLRadius(1.4);
+            viewer.setEDLStrength(0.4);
+            viewer.setPointBudget({point_budget});
+            viewer.setBackground("black");
+            viewer.setFOV(60);
+
+            const pcURL = "{potree_url}";
+            console.log("[Potree] loading →", pcURL);
+
+            // In Potree 1.8.x, loadPointCloud is registered during loadGUI init
+            viewer.loadGUI(() => {{
+                // Suppress the sidebar loadGUI creates
+                const sb = document.getElementById("potree_sidebar_container");
+                if (sb) sb.style.setProperty("display", "none", "important");
+                const mt = document.querySelector(".potree_menu_toggle");
+                if (mt) mt.style.setProperty("display", "none", "important");
+
+                try {{
+                    Potree.loadPointCloud(pcURL, "{survey_name}", e => {{
+                        console.log("[Potree] point cloud loaded ✓");
+                        const lo = document.getElementById("loading_overlay");
+                        if (lo) lo.style.display = "none";
+
+                        const pointcloud = e.pointcloud;
+                        const material   = pointcloud.material;
+
+                        {colour_js}
+
+                        material.size          = 1;
+                        material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+
+                        viewer.scene.addPointCloud(pointcloud);
+                        viewer.fitToScreen();
+                    }});
+                }} catch(e) {{
+                    showError("loadPointCloud threw: " + e);
+                }}
+            }});
+
         }} catch(e) {{
-            showError("loadPointCloud threw: " + e);
+            showError("Viewer init failed: " + e);
         }}
-    }});
+    }}
   </script>
 </body>
 </html>"""
