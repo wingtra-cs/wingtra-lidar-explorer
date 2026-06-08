@@ -268,6 +268,36 @@ def _potree_html(potree_url, assets_base, survey_name,
   </div>
 
   <!-- All deps load before potree.js — matches heidentor.html order exactly -->
+<!-- Worker monkey-patch: cross-origin Workers are silently blocked in srcdoc iframes.
+       This intercepts Worker creation, fetches the script via XHR (CORS OK), rewrites
+       relative importScripts to absolute URLs, and creates from a Blob URL instead. -->
+  <script>
+  (function() {{
+      var _W = window.Worker;
+      window.Worker = function(url, opts) {{
+          try {{ return new _W(url, opts); }}
+          catch(e) {{
+              console.warn("[WorkerPatch] blob fallback for:", url);
+              var base = url.substring(0, url.lastIndexOf('/') + 1);
+              var xhr = new XMLHttpRequest();
+              xhr.open('GET', url, false);
+              xhr.send();
+              if (xhr.status !== 200) throw new Error('Worker fetch failed: ' + xhr.status);
+              var code = xhr.responseText.replace(
+                  /importScripts\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+                  function(m, p) {{
+                      if (/^https?:\/\//.test(p)) return m;
+                      try {{ return 'importScripts("' + new URL(p, base).href + '")'; }}
+                      catch(err) {{ return m; }}
+                  }}
+              );
+              var blob = new Blob([code], {{type: 'application/javascript'}});
+              return new _W(URL.createObjectURL(blob), opts);
+          }}
+      }};
+      window.Worker.prototype = _W.prototype;
+  }})();
+  </script>
   {dep_scripts}
   <script src="{assets_base}/libs/other/BinaryHeap.js"></script>
   <script src="{assets_base}/potree.js"></script>
