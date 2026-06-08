@@ -141,18 +141,11 @@ _CDN_DEPS = [
 
 
 def _potree_html(potree_url, assets_base, survey_name,
-                 point_budget, edl_enabled, colour_mode):
-    """Potree 1.8.x viewer HTML — all fixes incorporated.
-
-    Key insight: viewer.loadGUI() was blocking because it tries to load
-    sidebar.html from R2 via AJAX in the srcdoc iframe, and the callback
-    never fires. But loadGUI is NOT needed — Potree.loadPointCloud is
-    already on the namespace (confirmed via the keys dump). Since we hide
-    the sidebar anyway, skipping loadGUI entirely is both simpler and
-    avoids the hang.
-    """
+                 point_budget, colour_mode):
+    """Potree 1.8.x viewer — EDL removed (GPU-heavy post-processing),
+    replaced with zero-cost alternatives: adaptive point sizing + square
+    point shape + elevation/intensity colouring for depth perception."""
     colour_js = _POTREE_COLOUR_JS.get(colour_mode, _POTREE_COLOUR_JS["Elevation"])
-    edl_js    = "true" if edl_enabled else "false"
     dep_tags  = "\n".join(f'<script src="{u}"></script>' for u in _CDN_DEPS)
 
     return f"""<!DOCTYPE html>
@@ -187,9 +180,7 @@ html,body{{width:100%;height:100%;overflow:hidden;background:#0c0c12}}
   <div class="detail" id="error_detail">Check the browser console (F12).</div>
 </div>
 
-<!-- ═══ 1. Worker monkey-patch ════════════════════════════════════════════
-     srcdoc iframe → origin "null" → Workers silently fail.
-     Detect null origin, always use blob fallback. ════════════════════════ -->
+<!-- Worker monkey-patch for srcdoc iframe (null origin) -->
 <script>
 (function(){{
   var _W=window.Worker;
@@ -216,20 +207,10 @@ html,body{{width:100%;height:100%;overflow:hidden;background:#0c0c12}}
 }})();
 </script>
 
-<!-- ═══ 2. CDN dependencies ═══════════════════════════════════════════════ -->
 {dep_tags}
-
-<!-- ═══ 3. BinaryHeap from R2 ═════════════════════════════════════════════ -->
 <script src="{assets_base}/libs/other/BinaryHeap.js"></script>
-
-<!-- ═══ 4. Potree core ════════════════════════════════════════════════════ -->
 <script src="{assets_base}/potree.js"></script>
 
-<!-- ═══ 5. Viewer init ════════════════════════════════════════════════════
-     No loadGUI() — it tries to AJAX-load sidebar.html from R2 and hangs
-     in the srcdoc iframe. Potree.loadPointCloud is already on the namespace
-     (confirmed from the keys dump), so we call it directly. We never wanted
-     the Potree sidebar anyway — the Streamlit sidebar handles everything. -->
 <script>
 function showError(msg){{
   var lo=document.getElementById("loading_overlay");
@@ -241,23 +222,13 @@ function showError(msg){{
   console.error("[Potree]",msg);
 }}
 
-console.log("[Potree] THREE:",typeof THREE,typeof THREE!=="undefined"?"r"+THREE.REVISION:"MISSING");
-console.log("[Potree] TWEEN:",typeof TWEEN);
-console.log("[Potree] BinaryHeap:",typeof BinaryHeap);
-console.log("[Potree] Potree.Viewer:",typeof Potree!=="undefined"?typeof Potree.Viewer:"N/A");
-console.log("[Potree] Potree.loadPointCloud:",typeof Potree!=="undefined"?typeof Potree.loadPointCloud:"N/A");
-console.log("[Potree] origin:",window.location.origin,"(forceBlob:"+(window.location.origin==="null")+")");
-
 if(typeof Potree==="undefined"){{showError("Potree failed to load.");}}
 else{{
 
   var el=document.getElementById("potree_render_area");
 
   function _awaitSize(){{
-    if(el.clientWidth>0 && el.clientHeight>0){{
-      console.log("[Potree] container:",el.clientWidth,"x",el.clientHeight);
-      _initViewer();
-    }}
+    if(el.clientWidth>0 && el.clientHeight>0){{ _initViewer(); }}
     else{{ requestAnimationFrame(_awaitSize); }}
   }}
 
@@ -266,28 +237,38 @@ else{{
       Potree.scriptPath="{assets_base}";
 
       var viewer=new Potree.Viewer(el);
-      console.log("[Potree] Viewer created ✓");
 
-      viewer.setEDLEnabled({edl_js});
-      viewer.setEDLRadius(1.4);
-      viewer.setEDLStrength(0.4);
+      // EDL disabled — it's a full-screen depth-buffer post-process that
+      // halves frame rate during pan/zoom. Depth perception comes from
+      // elevation colouring + adaptive point sizing instead (zero GPU cost).
+      viewer.setEDLEnabled(false);
+
       viewer.setPointBudget({point_budget});
       viewer.setBackground("black");
       viewer.setFOV(60);
 
       var pcURL="{potree_url}";
-      console.log("[Potree] calling loadPointCloud →",pcURL);
+      console.log("[Potree] loading →",pcURL);
 
       Potree.loadPointCloud(pcURL,"{survey_name}",function(e){{
-        console.log("[Potree] ✓ point cloud loaded, adding to scene");
+        console.log("[Potree] ✓ point cloud loaded");
         var lo=document.getElementById("loading_overlay");
         if(lo)lo.style.display="none";
 
         var pc=e.pointcloud;
         var material=pc.material;
+
+        // Colour mode
         {colour_js}
+
+        // Adaptive sizing — points shrink as you zoom in, grow as you zoom out.
+        // Gives implicit depth without any post-processing cost.
         material.size=1;
         material.pointSizeType=Potree.PointSizeType.ADAPTIVE;
+
+        // Square shape — no alpha blending needed (faster than circle).
+        // At 1px adaptive size the visual difference is negligible.
+        material.shape=Potree.PointShape.SQUARE;
 
         viewer.scene.addPointCloud(pc);
         viewer.fitToScreen();
@@ -311,25 +292,23 @@ def render_potree_viewer(bundle, potree_settings):
         st.warning("**r2_public_url** not set — falling back to PyDeck.")
         render_point_cloud(bundle, {}, 2); return
 
-    potree_key  = meta.get("potree_key", f"lidar/{meta['slug']}/potree/metadata.json")
+    potree_key = meta.get("potree_key", f"lidar/{meta['slug']}/potree/metadata.json")
     html = _potree_html(
         potree_url  = f"{r2_public}/{potree_key}",
         assets_base = f"{r2_public}/potree-assets",
         survey_name = meta.get("name", meta.get("slug","Survey")),
         point_budget= potree_settings["point_budget"],
-        edl_enabled = potree_settings["edl_enabled"],
         colour_mode = potree_settings["colour_mode"],
     )
     components.html(html, height=650, scrolling=False)
 
-    cols = st.columns(4)
+    cols = st.columns(3)
     cols[0].metric("Total points",  _fmt_n(meta.get("n_total",0)))
     cols[1].metric("Elevation min", f"{meta.get('z_min',0):.1f} m")
     cols[2].metric("Elevation max", f"{meta.get('z_max',0):.1f} m")
-    cols[3].metric("Point budget",  _fmt_n(potree_settings["point_budget"]))
-    edl = "EDL on" if potree_settings["edl_enabled"] else "EDL off"
-    st.caption(f"Full {_fmt_n(meta.get('n_total',0))}-point LIDAR · Potree streaming · {edl} · "
-               f"colour: {potree_settings['colour_mode'].lower()}")
+    st.caption(f"Full {_fmt_n(meta.get('n_total',0))}-point LIDAR · Potree streaming · "
+               f"colour: {potree_settings['colour_mode'].lower()} · "
+               f"budget: {_fmt_n(potree_settings['point_budget'])}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
@@ -434,14 +413,14 @@ def main():
                     use_pot=meta.get("potree_available",False) and bool(r2p)
                     st.header("Point cloud")
                     if use_pot:
-                        pb=st.select_slider("Point budget",options=[500_000,1_000_000,2_000_000,3_000_000,5_000_000],
+                        pb=st.select_slider("Point budget",
+                            options=[500_000,1_000_000,2_000_000,3_000_000,5_000_000],
                             value=1_000_000,format_func=_fmt_n,
-                            help="Max points rendered. Higher = more detail, slower.")
-                        edl=st.checkbox("Eye-dome lighting (EDL)",value=True,
-                            help="Depth shading based on neighbouring points.")
+                            help="Max points rendered at once. Lower = smoother navigation.")
                         cm=st.selectbox("Colour by",["Elevation","Intensity"],
-                            help="Elevation = rainbow height. Intensity = laser return strength.")
-                        potset={"point_budget":pb,"edl_enabled":edl,"colour_mode":cm}
+                            help="Elevation = rainbow height map. "
+                                 "Intensity = laser return strength (photographic on hard surfaces).")
+                        potset={"point_budget":pb,"colour_mode":cm}
                     else:
                         ps=st.slider("Point size",1,6,2,help="Pixel size per point.")
                         for n in meta.get("layers",[]):
@@ -474,7 +453,7 @@ def main():
     if picked==PLACEHOLDER or bundle is None:
         st.markdown("""<div class="wingtra-card"><div class="wingtra-card-title">Select a survey</div>
           <p>Pick a dataset from the sidebar.</p><ul>
-          <li>Full LIDAR via Potree — streaming, EDL, 131M+ points</li>
+          <li>Full LIDAR via Potree — streaming, 131M+ points</li>
           <li>Terrain model with vertical exaggeration</li>
           <li>Download raw LAS and GeoTIFF</li></ul></div>""",unsafe_allow_html=True)
         st.stop()
