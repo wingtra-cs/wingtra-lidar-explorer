@@ -4,11 +4,12 @@ LIDAR Survey Explorer
 Password-protected Streamlit app for visualising WingtraRay LIDAR surveys.
 
 Secrets (.streamlit/secrets.toml):
-    app_password = "..."
+    app_password   = "..."
+    r2_public_url  = "https://pub-<hash>.r2.dev"   # public R2 dev URL for Potree
 
     [r2]
     account_id = "..."
-    access_key = "..."     # read-only
+    access_key = "..."     # read-only (parquet / npy / meta via presigned URLs)
     secret_key = "..."
     bucket     = "ptpn-bucket"
 """
@@ -18,6 +19,7 @@ import hmac
 import base64
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 import pydeck as pdk
 import plotly.graph_objects as go
 
@@ -40,7 +42,6 @@ CSS = f"""
 <style>
   .stApp {{ background-color: {URANUS0}; }}
 
-  /* ── Dark sidebar ──────────────────────────────────────────────────── */
   section[data-testid="stSidebar"] {{ background-color: {MERCURY500}; }}
   section[data-testid="stSidebar"] * {{ color: #FFFFFF; }}
   section[data-testid="stSidebar"] input,
@@ -53,49 +54,35 @@ CSS = f"""
   div[data-baseweb="popover"] li, ul[role="listbox"] li {{ color: #FFFFFF; }}
   ul[role="listbox"] li:hover {{ background-color: #16242B; }}
 
-  /* ── Help (?) icon: force visible on dark sidebar ───────────────────── */
   section[data-testid="stSidebar"] [data-testid="stTooltipHoverTarget"],
   section[data-testid="stSidebar"] [data-testid="stTooltipHoverTarget"] svg,
   section[data-testid="stSidebar"] [data-testid="stTooltipHoverTarget"] svg * {{
-      color: {URANUS300} !important;
-      fill: {URANUS300} !important;
-      stroke: {URANUS300} !important;
-      opacity: 1 !important;
-  }}
+      color: {URANUS300} !important; fill: {URANUS300} !important;
+      stroke: {URANUS300} !important; opacity: 1 !important; }}
 
-  /* ── Sidebar secondary buttons/links: dark bg so text stays visible ── */
   section[data-testid="stSidebar"] button[kind="secondary"],
   section[data-testid="stSidebar"] [data-testid="baseButton-secondary"] {{
       background-color: #16242B !important;
-      border: 1px solid #3A4F59 !important;
-      color: #FFFFFF !important;
-  }}
+      border: 1px solid #3A4F59 !important; color: #FFFFFF !important; }}
   section[data-testid="stSidebar"] [data-testid="stLinkButtonContainer"] a,
   section[data-testid="stSidebar"] .stLinkButton a {{
       background-color: #16242B !important;
-      border: 1px solid #3A4F59 !important;
-      color: #FFFFFF !important;
-  }}
+      border: 1px solid #3A4F59 !important; color: #FFFFFF !important; }}
 
-  /* ── Header ────────────────────────────────────────────────────────── */
   .wingtra-header {{
       display: flex; align-items: center; gap: 18px;
-      background-color: {MERCURY600};
-      border-bottom: 3px solid {SUN_ORANGE};
-      padding: 14px 22px; margin: -1.2rem -1.2rem 1.0rem -1.2rem;
-  }}
+      background-color: {MERCURY600}; border-bottom: 3px solid {SUN_ORANGE};
+      padding: 14px 22px; margin: -1.2rem -1.2rem 1.0rem -1.2rem; }}
   .wingtra-header img {{ height: 30px; }}
   .wingtra-wordmark {{ color: {SUN_ORANGE}; font-size: 28px; font-weight: 800; letter-spacing: .5px; }}
   .wingtra-title {{ color: #FFFFFF; font-size: 20px; font-weight: 800; line-height: 1.2; }}
   .wingtra-subtitle {{ color: {URANUS300}; font-size: 12.5px; font-weight: 500; }}
 
-  /* ── Metric cards ──────────────────────────────────────────────────── */
   div[data-testid="stMetric"] {{
       background: #FFFFFF; border: 1px solid #D7E0E2; border-radius: 12px;
       padding: 12px 16px; box-shadow: 0 1px 3px rgba(28,46,54,0.06); }}
   div[data-testid="stMetricLabel"] p {{ color: #5b6b72; font-weight: 600; }}
 
-  /* ── Empty-state card ──────────────────────────────────────────────── */
   .wingtra-card {{
       max-width: 680px; margin: 32px auto 0; padding: 28px 32px;
       background: #FFFFFF; border: 1px solid #D7E0E2; border-radius: 14px;
@@ -103,6 +90,13 @@ CSS = f"""
   .wingtra-card-title {{ color: {MERCURY600}; font-size: 20px; font-weight: 800; margin-bottom: 8px; }}
   .wingtra-card p, .wingtra-card li {{ color: #46555b; font-size: 14px; line-height: 1.6; }}
   .wingtra-card ul {{ margin: 10px 0 0; padding-left: 22px; }}
+
+  /* Badge shown in Point Cloud tab header when Potree is active */
+  .potree-badge {{
+      display: inline-block; background: {SUN_ORANGE}; color: #fff;
+      font-size: 10px; font-weight: 700; letter-spacing: .5px;
+      padding: 2px 7px; border-radius: 4px; margin-left: 8px;
+      vertical-align: middle; text-transform: uppercase; }}
 </style>
 """
 
@@ -163,9 +157,7 @@ def _layer_label(name):
             "nonground": "Non-ground",
             "points":    "All points (unclassified)"}.get(name, name)
 
-
 def _vivid_colors(z_vals):
-    """7-stop rainbow elevation scale — vivid on dark backgrounds."""
     v = np.asarray(z_vals, dtype="float64")
     finite = v[np.isfinite(v)]
     if finite.size == 0:
@@ -183,17 +175,154 @@ def _vivid_colors(z_vals):
 
 
 # --------------------------------------------------------------------------- #
-#  Point cloud tab
+#  Potree viewer (Phase 3)
+# --------------------------------------------------------------------------- #
+_POTREE_COLOUR_JS = {
+    "Elevation": """
+        material.activeAttributeName = "elevation";
+        material.gradient = Potree.Gradients.RAINBOW;
+    """,
+    "Intensity": """
+        material.activeAttributeName = "intensity";
+        material.gradient = Potree.Gradients.GRAYSCALE;
+    """,
+}
+
+
+def _potree_html(potree_url, assets_base, survey_name,
+                 point_budget, edl_enabled, colour_mode):
+    """Generate a self-contained Potree viewer HTML page."""
+    colour_js = _POTREE_COLOUR_JS.get(colour_mode,
+                    _POTREE_COLOUR_JS["Elevation"])
+    edl_js = "true" if edl_enabled else "false"
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="{assets_base}/potree.css">
+  <style>
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    html, body {{ width: 100%; height: 100%; overflow: hidden; background: #0c0c12; }}
+    #potree_render_area {{ position: absolute; width: 100%; height: 100%; }}
+
+    /* Hide Potree's own sidebar and menu — we use the Streamlit sidebar */
+    #potree_sidebar_container {{ display: none !important; }}
+    .potree_menu_toggle        {{ display: none !important; }}
+
+    /* Loading overlay */
+    #loading_overlay {{
+        position: absolute; top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        font-family: -apple-system, sans-serif; text-align: center;
+        pointer-events: none;
+    }}
+    #loading_overlay .msg {{ font-size: 14px; color: #A3BABD; margin-bottom: 6px; }}
+    #loading_overlay .sub {{ font-size: 12px; color: #4a5a60; }}
+  </style>
+</head>
+<body>
+  <div id="potree_render_area"></div>
+  <div id="loading_overlay">
+    <div class="msg">Loading LIDAR point cloud…</div>
+    <div class="sub">Streaming tiles from cloud storage</div>
+  </div>
+
+  <script src="{assets_base}/potree.js"></script>
+  <script>
+    const viewer = new Potree.Viewer(
+        document.getElementById("potree_render_area")
+    );
+
+    viewer.setEDLEnabled({edl_js});
+    viewer.setEDLRadius(1.4);
+    viewer.setEDLStrength(0.4);
+    viewer.setPointBudget({point_budget});
+    viewer.setBackground("black");
+    viewer.setFOV(60);
+
+    Potree.loadPointCloud(
+        "{potree_url}",
+        "{survey_name}",
+        e => {{
+            // Hide loading overlay once the first tiles arrive
+            const overlay = document.getElementById("loading_overlay");
+            if (overlay) overlay.style.display = "none";
+
+            const pointcloud = e.pointcloud;
+            const material   = pointcloud.material;
+
+            {colour_js}
+
+            material.size          = 1;
+            material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+
+            viewer.scene.addPointCloud(pointcloud);
+            viewer.fitToScreen();
+        }}
+    );
+  </script>
+</body>
+</html>"""
+
+
+def render_potree_viewer(bundle, potree_settings):
+    """Render the Potree point cloud viewer inside a Streamlit iframe."""
+    meta        = bundle["meta"]
+    r2_public   = st.secrets.get("r2_public_url", "").rstrip("/")
+
+    if not r2_public:
+        st.warning(
+            "**r2_public_url** is not set in secrets — "
+            "falling back to the downsampled PyDeck view. "
+            "Add `r2_public_url = \"https://pub-<hash>.r2.dev\"` to your secrets."
+        )
+        render_point_cloud(bundle, {}, 2)
+        return
+
+    potree_key  = meta.get("potree_key",
+                           f"lidar/{meta['slug']}/potree/metadata.json")
+    potree_url  = f"{r2_public}/{potree_key}"
+    assets_base = f"{r2_public}/potree-assets"
+
+    html = _potree_html(
+        potree_url   = potree_url,
+        assets_base  = assets_base,
+        survey_name  = meta.get("name", meta.get("slug", "Survey")),
+        point_budget = potree_settings["point_budget"],
+        edl_enabled  = potree_settings["edl_enabled"],
+        colour_mode  = potree_settings["colour_mode"],
+    )
+
+    components.html(html, height=650, scrolling=False)
+
+    cols = st.columns(4)
+    cols[0].metric("Total points",   _fmt_n(meta.get("n_total", 0)))
+    cols[1].metric("Elevation min",  f"{meta.get('z_min', 0):.1f} m")
+    cols[2].metric("Elevation max",  f"{meta.get('z_max', 0):.1f} m")
+    cols[3].metric("Point budget",   _fmt_n(potree_settings["point_budget"]))
+
+    edl_str = "EDL on" if potree_settings["edl_enabled"] else "EDL off"
+    st.caption(
+        f"Full {_fmt_n(meta.get('n_total', 0))}-point LIDAR dataset · "
+        f"Potree progressive streaming · {edl_str} · "
+        f"colour: {potree_settings['colour_mode'].lower()}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+#  PyDeck point cloud (fallback / surveys without Potree tiles)
 # --------------------------------------------------------------------------- #
 _LIGHTING_EFFECT = {
     "@@type": "LightingEffect",
-    "ambientLight": {"@@type": "AmbientLight", "color": [255, 255, 255], "intensity": 0.5},
-    "_lights": [{"@@type": "DirectionalLight", "color": [255, 255, 255],
+    "ambientLight": {"@@type": "AmbientLight", "color": [255,255,255], "intensity": 0.5},
+    "_lights": [{"@@type": "DirectionalLight", "color": [255,255,255],
                  "intensity": 1.0, "direction": [-2, -4, -1]}],
 }
 
 
 def render_point_cloud(bundle, visible_layers, point_size):
+    """PyDeck point cloud renderer (downsampled fallback)."""
     meta = bundle["meta"]
 
     import pandas as pd
@@ -205,12 +334,8 @@ def render_point_cloud(bundle, visible_layers, point_size):
 
     with st.spinner("Preparing point cloud…"):
         combined = pd.concat(frames, ignore_index=True).copy()
-
-        # Vivid elevation colouring (overrides pre-baked parquet rgb)
-        r, g, b = _vivid_colors(combined["z"].values)
+        r, g, b  = _vivid_colors(combined["z"].values)
         combined["r"], combined["g"], combined["b"] = r, g, b
-
-        # Round z to 1 decimal — prevents the raw float showing in the tooltip
         combined["z"] = combined["z"].round(1)
 
         bounds   = meta["bounds_4326"]
@@ -220,25 +345,18 @@ def render_point_cloud(bundle, visible_layers, point_size):
         zoom     = max(10, min(17, round(np.log2(360 / lon_span) - 1)))
 
         layer = pdk.Layer(
-            "PointCloudLayer",
-            data=combined,
-            get_position=["lon", "lat", "z"],
-            get_color=["r", "g", "b"],
-            point_size=point_size,
-            pickable=True,
-            material={"ambient": 0.4, "diffuse": 0.6,
-                      "shininess": 32, "specularColor": [60, 60, 60]},
+            "PointCloudLayer", data=combined,
+            get_position=["lon", "lat", "z"], get_color=["r", "g", "b"],
+            point_size=point_size, pickable=True,
+            material={"ambient":0.4,"diffuse":0.6,"shininess":32,
+                      "specularColor":[60,60,60]},
         )
         view = pdk.ViewState(latitude=clat, longitude=clon,
                              zoom=zoom, pitch=55, bearing=0)
-        deck = pdk.Deck(
-            layers=[layer],
-            initial_view_state=view,
-            map_provider=None,
-            map_style="",
-            tooltip={"text": "Z: {z} m"},
-            effects=[_LIGHTING_EFFECT],
-        )
+        deck = pdk.Deck(layers=[layer], initial_view_state=view,
+                        map_provider=None, map_style="",
+                        tooltip={"text": "Z: {z} m"},
+                        effects=[_LIGHTING_EFFECT])
 
     st.pydeck_chart(deck, use_container_width=True)
 
@@ -251,10 +369,9 @@ def render_point_cloud(bundle, visible_layers, point_size):
     cols[3].metric("Elevation max",  f"{meta.get('z_max', 0):.1f} m")
 
     st.caption(
-        f"{'Classified' if meta['mode'] == 'classified' else 'Unclassified'} "
-        f"LIDAR point cloud · {_fmt_n(n_display)} display pts from "
+        f"Downsampled LIDAR · {_fmt_n(n_display)} display pts from "
         f"{_fmt_n(meta.get('n_total', 0))} raw · colours = elevation · "
-        "large surveys may take a few seconds to fully render in the browser"
+        "large surveys may take a few seconds to fully render"
     )
 
 
@@ -286,46 +403,40 @@ def render_dtm(bundle, vert_exag, colorscale):
 
     nrows, ncols = dtm.shape
     lons = np.linspace(bounds["lon_min"], bounds["lon_max"], ncols)
-    lats = np.linspace(bounds["lat_max"], bounds["lat_min"], nrows)  # N→S
+    lats = np.linspace(bounds["lat_max"], bounds["lat_min"], nrows)
     x_m  = (lons - lon0) * m_lon
     y_m  = (lats - lat0) * m_lat
 
     z_pl      = dtm * vert_exag
-    dtm_hover = dtm
-
-    span_x = float(x_m.max() - x_m.min())
-    span_y = float(y_m.max() - y_m.min())
-    span_z = (z_max_disp - z_min_disp) * vert_exag
-    ms     = max(span_x, span_y, span_z, 1)
-
+    span_x    = float(x_m.max() - x_m.min())
+    span_y    = float(y_m.max() - y_m.min())
+    span_z    = (z_max_disp - z_min_disp) * vert_exag
+    ms        = max(span_x, span_y, span_z, 1)
     tick_vals = np.linspace(z_min_disp, z_max_disp, 6)
     scene_bg  = "rgb(12, 12, 18)"
 
     fig = go.Figure(data=[go.Surface(
         z=z_pl, x=x_m, y=y_m,
-        colorscale=colorscale,
-        cmin=z_min_disp, cmax=z_max_disp,
+        colorscale=colorscale, cmin=z_min_disp, cmax=z_max_disp,
         colorbar=dict(
             title=dict(text="Elevation (m)", font=dict(color="#cccccc")),
-            tickvals=tick_vals,
-            ticktext=[f"{v:.0f}" for v in tick_vals],
-            tickfont=dict(color="#cccccc"),
-            thickness=14, len=0.7,
+            tickvals=tick_vals, ticktext=[f"{v:.0f}" for v in tick_vals],
+            tickfont=dict(color="#cccccc"), thickness=14, len=0.7,
         ),
-        customdata=dtm_hover,
+        customdata=dtm,
         hovertemplate=(
             "E: %{x:.0f} m<br>N: %{y:.0f} m<br>"
             "Elevation: %{customdata:.1f} m<extra></extra>"
         ),
     )])
 
-    axis_style = dict(tickfont=dict(color="#888888"),
-                      gridcolor="#2a2a3a", showbackground=False)
+    ax = dict(tickfont=dict(color="#888888"), gridcolor="#2a2a3a",
+              showbackground=False)
     fig.update_layout(
         scene=dict(
-            xaxis=dict(title=dict(text="Easting offset (m)",  font=dict(color="#aaaaaa")), **axis_style),
-            yaxis=dict(title=dict(text="Northing offset (m)", font=dict(color="#aaaaaa")), **axis_style),
-            zaxis=dict(title=dict(text="Elevation (m)",       font=dict(color="#aaaaaa")), **axis_style),
+            xaxis=dict(title=dict(text="Easting offset (m)",  font=dict(color="#aaaaaa")), **ax),
+            yaxis=dict(title=dict(text="Northing offset (m)", font=dict(color="#aaaaaa")), **ax),
+            zaxis=dict(title=dict(text="Elevation (m)",       font=dict(color="#aaaaaa")), **ax),
             aspectmode="manual",
             aspectratio=dict(x=span_x/ms, y=span_y/ms, z=span_z/ms),
             bgcolor=scene_bg,
@@ -340,7 +451,7 @@ def render_dtm(bundle, vert_exag, colorscale):
     cols[0].metric("Min elevation", f"{z_min_disp:.1f} m")
     cols[1].metric("Max elevation", f"{z_max_disp:.1f} m")
     cols[2].metric("Relief",        f"{z_max_disp - z_min_disp:.1f} m")
-    cols[3].metric("Source res.",   f"{res} m/px" if isinstance(res, (int, float)) else str(res))
+    cols[3].metric("Source res.",   f"{res} m/px" if isinstance(res,(int,float)) else str(res))
 
     st.caption(
         f"Digital terrain model · {nrows}×{ncols} grid · "
@@ -359,12 +470,14 @@ def main():
 
     render_header()
 
+    # Defaults — overwritten in the sidebar block when a survey is picked
     bundle         = None
     visible_layers = {}
     point_size     = 2
     vert_exag      = 1.0
     colorscale     = "Turbo"
     picked         = PLACEHOLDER
+    potree_settings = None   # None = use PyDeck fallback
 
     with st.sidebar:
         st.header("Survey")
@@ -389,18 +502,70 @@ def main():
                         bundle = None
 
                 if bundle:
-                    meta = bundle["meta"]
+                    meta       = bundle["meta"]
+                    r2_public  = st.secrets.get("r2_public_url", "").strip()
+                    use_potree = meta.get("potree_available", False) and bool(r2_public)
 
+                    # ---- Point cloud controls ----------------------------- #
                     st.header("Point cloud")
-                    point_size = st.slider(
-                        "Point size", 1, 6, 2,
-                        help="Pixel size of each rendered point. Increase for sparse "
-                             "clouds; decrease if it looks blocky.",
-                    )
-                    for name in meta.get("layers", []):
-                        visible_layers[name] = st.checkbox(
-                            _layer_label(name), value=True)
 
+                    if use_potree:
+                        # Potree mode — progressive full-res streaming
+                        point_budget = st.select_slider(
+                            "Point budget",
+                            options=[500_000, 1_000_000, 2_000_000,
+                                     3_000_000, 5_000_000],
+                            value=1_000_000,
+                            format_func=_fmt_n,
+                            help=(
+                                "Maximum points rendered at once. Potree streams "
+                                "progressively — this is a quality ceiling, not a "
+                                "hard cap on what's loaded. Higher = more detail "
+                                "but slower on first navigate."
+                            ),
+                        )
+                        edl_enabled = st.checkbox(
+                            "Eye-dome lighting (EDL)", value=True,
+                            help=(
+                                "Shading technique that gives strong depth "
+                                "perception — each point is shaded based on its "
+                                "neighbours. Disable for flat, unshaded rendering."
+                            ),
+                        )
+                        colour_mode = st.selectbox(
+                            "Colour by",
+                            ["Elevation", "Intensity"],
+                            help=(
+                                "Elevation = rainbow height map. "
+                                "Intensity = laser return strength — "
+                                "gives an almost photographic view where hard "
+                                "surfaces (roads, bare soil) appear bright."
+                            ),
+                        )
+                        potree_settings = {
+                            "point_budget": point_budget,
+                            "edl_enabled":  edl_enabled,
+                            "colour_mode":  colour_mode,
+                        }
+
+                    else:
+                        # PyDeck fallback — downsampled parquet
+                        point_size = st.slider(
+                            "Point size", 1, 6, 2,
+                            help="Pixel size of each rendered point. Increase for "
+                                 "sparse clouds; decrease if it looks blocky.",
+                        )
+                        for name in meta.get("layers", []):
+                            visible_layers[name] = st.checkbox(
+                                _layer_label(name), value=True)
+
+                        if not meta.get("potree_available"):
+                            st.caption(
+                                "💡 Run PotreeConverter + upload tiles to enable "
+                                "the full-res Potree viewer for this survey."
+                            )
+
+                    # ---- Terrain model controls -------------------------- #
                     if bundle["dtm"] is not None:
                         st.header("Terrain model")
                         vert_exag = st.slider(
@@ -414,8 +579,11 @@ def main():
                                  "perceptually uniform.",
                         )
 
+                    # ---- Info -------------------------------------------- #
                     st.header("Info")
+                    viewer_mode = "Potree (full res)" if use_potree else "PyDeck (downsampled)"
                     st.markdown(
+                        f"**Viewer:** {viewer_mode}  \n"
                         f"**Mode:** {meta['mode'].capitalize()}  \n"
                         f"**Raw points:** {_fmt_n(meta.get('n_total', 0))}  \n"
                         f"**Source CRS:** {meta.get('crs_source', '—')}  \n"
@@ -423,47 +591,59 @@ def main():
                         f"{'Included' if meta.get('dtm_available') else 'Not available'}"
                     )
 
+                    # ---- Downloads --------------------------------------- #
                     st.header("Downloads")
                     raw_las_key = meta.get("raw_las_key")
                     raw_dtm_key = meta.get("raw_dtm_key")
 
                     if raw_las_key:
                         try:
-                            st.link_button("⬇  Raw LAS (full res)",
-                                           presigned_url(raw_las_key, ttl=900),
-                                           use_container_width=True, type="primary")
+                            st.link_button(
+                                "⬇  Raw LAS (full res)",
+                                presigned_url(raw_las_key, ttl=900),
+                                use_container_width=True, type="primary")
                         except Exception:
                             st.caption("LAS download unavailable")
 
                     if raw_dtm_key:
                         try:
-                            st.link_button("⬇  Terrain model (GeoTIFF)",
-                                           presigned_url(raw_dtm_key, ttl=900),
-                                           use_container_width=True)
+                            st.link_button(
+                                "⬇  Terrain model (GeoTIFF)",
+                                presigned_url(raw_dtm_key, ttl=900),
+                                use_container_width=True)
                         except Exception:
                             st.caption("DTM download unavailable")
 
                     if not raw_las_key and not raw_dtm_key:
-                        st.caption("Re-run the preprocessing script to add downloads.")
+                        st.caption("Re-run preprocessing to add downloads.")
 
             if st.button("⟳ Refresh surveys"):
                 refresh_surveys(); st.rerun()
 
+    # ---- Main area: empty state ------------------------------------------ #
     if picked == PLACEHOLDER or bundle is None:
         st.markdown(
             """<div class="wingtra-card">
               <div class="wingtra-card-title">Select a survey to begin</div>
               <p>Pick a dataset from the <b>Dataset</b> dropdown in the sidebar.</p>
               <ul>
-                <li>LIDAR point cloud coloured by elevation — vivid rainbow scale on a dark canvas</li>
-                <li>Directional lighting for perceived depth and dimension</li>
-                <li>Digital terrain model with adjustable vertical exaggeration and colorscale</li>
-                <li>Download the raw LAS and terrain model GeoTIFF from the Downloads section</li>
+                <li>Full-resolution LIDAR via Potree — progressive streaming,
+                    eye-dome lighting, up to 131M points</li>
+                <li>Digital terrain model with adjustable vertical exaggeration
+                    and colorscale</li>
+                <li>Download the raw LAS and terrain model GeoTIFF</li>
               </ul>
             </div>""",
             unsafe_allow_html=True,
         )
         st.stop()
+
+    # ---- Tabs ------------------------------------------------------------ #
+    use_potree  = potree_settings is not None
+    cloud_label = (
+        "☁  Point Cloud"
+        + (' <span class="potree-badge">Potree</span>' if use_potree else "")
+    )
 
     tab_labels = ["☁  Point Cloud"]
     if bundle["dtm"] is not None:
@@ -472,7 +652,10 @@ def main():
     tabs = st.tabs(tab_labels)
 
     with tabs[0]:
-        render_point_cloud(bundle, visible_layers, point_size)
+        if use_potree:
+            render_potree_viewer(bundle, potree_settings)
+        else:
+            render_point_cloud(bundle, visible_layers, point_size)
 
     if len(tabs) > 1:
         with tabs[1]:
