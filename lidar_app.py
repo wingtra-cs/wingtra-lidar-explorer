@@ -120,7 +120,7 @@ def _vivid_colors(z_vals):
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
-#  Potree viewer — complete HTML with all fixes
+#  Potree viewer
 # ═══════════════════════════════════════════════════════════════════════════ #
 _POTREE_COLOUR_JS = {
     "Elevation": 'material.activeAttributeName="elevation";material.gradient=Potree.Gradients.RAINBOW;',
@@ -144,9 +144,8 @@ def _potree_html(potree_url, assets_base, survey_name,
                  point_budget, edl_enabled, colour_mode):
     colour_js = _POTREE_COLOUR_JS.get(colour_mode, _POTREE_COLOUR_JS["Elevation"])
     edl_js    = "true" if edl_enabled else "false"
-    dep_tags  = "\n  ".join(f'<script src="{u}"></script>' for u in _CDN_DEPS)
+    dep_tags  = "\n".join(f'<script src="{u}"></script>' for u in _CDN_DEPS)
 
-    # NOTE: every { and } in the JavaScript must be doubled for Python f-string
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -180,38 +179,45 @@ html,body{{width:100%;height:100%;overflow:hidden;background:#0c0c12}}
 </div>
 
 <!-- ═══ 1. Worker monkey-patch ════════════════════════════════════════════
-     srcdoc iframes have opaque (null) origin → new Worker(crossOriginURL)
-     is silently blocked. This patch fetches the script via XHR (CORS OK),
-     rewrites relative importScripts to absolute URLs, creates from Blob. -->
+     In a Streamlit srcdoc iframe, window.location.origin is the string "null".
+     Browsers silently refuse to run cross-origin Workers from a null origin —
+     new Worker(url) succeeds but the worker never executes its script.
+     The previous try/catch approach didn't work because Chrome doesn't THROW;
+     it just silently fails.
+
+     Fix: detect the null-origin context and ALWAYS use the blob fallback —
+     fetch the script via XHR (CORS is fine), rewrite relative importScripts
+     to absolute URLs, create the Worker from a Blob URL.  ═══════════════ -->
 <script>
 (function(){{
   var _W=window.Worker;
+  var _forceBlob=(window.location.origin==="null");
   window.Worker=function(url,opts){{
-    try{{return new _W(url,opts)}}
-    catch(e){{
-      console.warn("[WorkerPatch] blob fallback:",url);
-      var base=url.substring(0,url.lastIndexOf("/")+1);
-      var xhr=new XMLHttpRequest();xhr.open("GET",url,false);xhr.send();
-      if(xhr.status!==200)throw new Error("Worker fetch "+xhr.status);
-      var code=xhr.responseText.replace(
-        /importScripts\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
-        function(m,p){{
-          if(/^https?:\/\//.test(p))return m;
-          try{{return 'importScripts("'+new URL(p,base).href+'")'}}
-          catch(err){{return m}}
-        }}
-      );
-      return new _W(URL.createObjectURL(new Blob([code],{{type:"application/javascript"}})),opts);
+    if(!_forceBlob){{
+      try{{return new _W(url,opts)}}catch(e){{}}
     }}
+    console.log("[WorkerPatch] blob fallback:",url);
+    var base=url.substring(0,url.lastIndexOf("/")+1);
+    var xhr=new XMLHttpRequest();xhr.open("GET",url,false);xhr.send();
+    if(xhr.status!==200)throw new Error("Worker fetch "+xhr.status);
+    var code=xhr.responseText.replace(
+      /importScripts\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+      function(m,p){{
+        if(/^https?:\/\//.test(p))return m;
+        try{{return 'importScripts("'+new URL(p,base).href+'")'}}
+        catch(err){{return m}}
+      }}
+    );
+    return new _W(URL.createObjectURL(new Blob([code],{{type:"application/javascript"}})),opts);
   }};
   window.Worker.prototype=_W.prototype;
 }})();
 </script>
 
-<!-- ═══ 2. CDN dependencies (before potree.js) ═══════════════════════════ -->
+<!-- ═══ 2. CDN dependencies ═══════════════════════════════════════════════ -->
 {dep_tags}
 
-<!-- ═══ 3. BinaryHeap from R2 (used by visibility update in main thread) ═ -->
+<!-- ═══ 3. BinaryHeap from R2 ═════════════════════════════════════════════ -->
 <script src="{assets_base}/libs/other/BinaryHeap.js"></script>
 
 <!-- ═══ 4. Potree core ════════════════════════════════════════════════════ -->
@@ -233,18 +239,18 @@ console.log("[Potree] THREE:",typeof THREE,typeof THREE!=="undefined"?"r"+THREE.
 console.log("[Potree] TWEEN:",typeof TWEEN);
 console.log("[Potree] BinaryHeap:",typeof BinaryHeap);
 console.log("[Potree] Potree.Viewer:",typeof Potree!=="undefined"?typeof Potree.Viewer:"N/A");
+console.log("[Potree] origin:",window.location.origin,"(forceBlob:"+(window.location.origin==="null")+")");
 
 if(typeof Potree==="undefined"){{showError("Potree failed to load.");}}
 else{{
 
-  /* Wait until the render container has non-zero pixel dimensions.
-     In a Streamlit srcdoc iframe the layout may not be settled when
-     scripts first execute — creating the Viewer at 0×0 causes
-     GL_INVALID_FRAMEBUFFER_OPERATION (framebuffer has zero size). */
   var el=document.getElementById("potree_render_area");
 
   function _awaitSize(){{
-    if(el.clientWidth>0 && el.clientHeight>0){{ _initViewer(); }}
+    if(el.clientWidth>0 && el.clientHeight>0){{
+      console.log("[Potree] container size:",el.clientWidth,"x",el.clientHeight);
+      _initViewer();
+    }}
     else{{ requestAnimationFrame(_awaitSize); }}
   }}
 
@@ -264,6 +270,7 @@ else{{
       console.log("[Potree] loading →",pcURL);
 
       viewer.loadGUI(function(){{
+        console.log("[Potree] loadGUI callback fired");
         var sb=document.getElementById("potree_sidebar_container");
         if(sb)sb.style.setProperty("display","none","important");
         var mt=document.querySelector(".potree_menu_toggle");
