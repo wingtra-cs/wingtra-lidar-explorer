@@ -62,6 +62,9 @@ CSS = f"""
 </style>
 """
 
+# --------------------------------------------------------------------------- #
+#  Branding + auth
+# --------------------------------------------------------------------------- #
 def _logo_b64():
     if os.path.exists(LOGO_PATH):
         try: return base64.b64encode(open(LOGO_PATH,"rb").read()).decode()
@@ -89,6 +92,9 @@ def check_password():
         else: st.error("Incorrect password.")
     return False
 
+# --------------------------------------------------------------------------- #
+#  Helpers
+# --------------------------------------------------------------------------- #
 def _fmt_n(n):
     if n>=1_000_000: return f"{n/1e6:.1f}M"
     if n>=1_000: return f"{n/1e3:.0f}K"
@@ -108,9 +114,18 @@ def _vivid_colors(z_vals):
             np.interp(t,T,[20,80,200,220,220,120,0]).astype("uint8"),
             np.interp(t,T,[160,220,230,80,0,0,0]).astype("uint8"))
 
+# --------------------------------------------------------------------------- #
+#  Contour helpers
+# --------------------------------------------------------------------------- #
+_ALL_INTERVALS = [1, 2, 5, 10, 20]
+
+def _contour_options(relief):
+    """Intervals that produce at least 3 contour lines."""
+    return [i for i in _ALL_INTERVALS if relief / i >= 3] or [_ALL_INTERVALS[0]]
+
 
 # ═══════════════════════════════════════════════════════════════════════════ #
-#  Potree viewer — elevation colour, no EDL, circles, point budget only
+#  Potree viewer — elevation colour, no EDL, circles, black background
 # ═══════════════════════════════════════════════════════════════════════════ #
 _CDN_DEPS = [
     "https://cdnjs.cloudflare.com/ajax/libs/three.js/r124/three.min.js",
@@ -133,7 +148,7 @@ def _potree_html(potree_url, assets_base, survey_name, point_budget):
 <link rel="stylesheet" href="{assets_base}/potree.css">
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-html,body{{width:100%;height:100%;overflow:hidden;background:#0c0c12}}
+html,body{{width:100%;height:100%;overflow:hidden;background:#000}}
 #potree_render_area{{position:absolute;width:100%;height:100%}}
 #potree_sidebar_container{{display:none!important}}
 .potree_menu_toggle{{display:none!important}}
@@ -158,6 +173,9 @@ html,body{{width:100%;height:100%;overflow:hidden;background:#0c0c12}}
   <div class="detail" id="error_detail">Check the browser console (F12).</div>
 </div>
 
+<!-- Worker monkey-patch: srcdoc iframe has null origin, Workers silently fail.
+     Detect null origin → always fetch worker script via XHR, rewrite relative
+     importScripts to absolute URLs, create Worker from Blob URL. -->
 <script>
 (function(){{
   var _W=window.Worker;
@@ -178,10 +196,16 @@ html,body{{width:100%;height:100%;overflow:hidden;background:#0c0c12}}
 }})();
 </script>
 
+<!-- CDN dependencies (order matters — all before potree.js) -->
 {dep_tags}
+
+<!-- BinaryHeap from R2 (main-thread visibility update) -->
 <script src="{assets_base}/libs/other/BinaryHeap.js"></script>
+
+<!-- Potree core -->
 <script src="{assets_base}/potree.js"></script>
 
+<!-- Viewer init — no loadGUI (it hangs in srcdoc), loadPointCloud called directly -->
 <script>
 function showError(msg){{
   var lo=document.getElementById("loading_overlay"),eo=document.getElementById("error_overlay"),
@@ -192,10 +216,12 @@ function showError(msg){{
 if(typeof Potree==="undefined"){{showError("Potree failed to load.");}}
 else{{
   var el=document.getElementById("potree_render_area");
+
   function _awaitSize(){{
     if(el.clientWidth>0&&el.clientHeight>0)_initViewer();
     else requestAnimationFrame(_awaitSize);
   }}
+
   function _initViewer(){{
     try{{
       Potree.scriptPath="{assets_base}";
@@ -208,16 +234,19 @@ else{{
       Potree.loadPointCloud("{potree_url}","{survey_name}",function(e){{
         var lo=document.getElementById("loading_overlay");
         if(lo)lo.style.display="none";
-        var pc=e.pointcloud, mat=pc.material;
+
+        var pc=e.pointcloud,mat=pc.material;
         mat.activeAttributeName="elevation";
         mat.gradient=Potree.Gradients.RAINBOW;
         mat.size=1;
         mat.pointSizeType=Potree.PointSizeType.ADAPTIVE;
+
         viewer.scene.addPointCloud(pc);
         viewer.fitToScreen();
       }});
     }}catch(e){{showError("Init: "+e);}}
   }}
+
   _awaitSize();
 }}
 </script>
@@ -244,7 +273,7 @@ def render_potree_viewer(bundle, point_budget):
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
-#  PyDeck fallback
+#  PyDeck fallback (surveys without Potree tiles)
 # ═══════════════════════════════════════════════════════════════════════════ #
 _LIGHTING={"@@type":"LightingEffect",
     "ambientLight":{"@@type":"AmbientLight","color":[255,255,255],"intensity":0.5},
@@ -274,11 +303,11 @@ def render_point_cloud(bundle,visible_layers,point_size):
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
-#  DTM — with hillshade lighting, no hover tooltip
+#  DTM — hillshade lighting + contours, no hover tooltip
 # ═══════════════════════════════════════════════════════════════════════════ #
 DTM_CS=["Turbo","Viridis","Plasma","Inferno","Earth","RdYlBu"]
 
-def render_dtm(bundle,ve,cs):
+def render_dtm(bundle, ve, cs, contour_interval):
     dtm,dm=bundle["dtm"],bundle["dtm_meta"]
     if dtm is None: st.info("No terrain model."); return
     fm=np.isfinite(dtm)
@@ -295,6 +324,20 @@ def render_dtm(bundle,ve,cs):
     sx,sy,sz=float(xm.max()-xm.min()),float(ym.max()-ym.min()),(zhi-zlo)*ve
     ms=max(sx,sy,sz,1); tv=np.linspace(zlo,zhi,6); bg="rgb(12,12,18)"
 
+    # Contour config — Plotly built-in Surface contours (WebGL, zero CPU cost)
+    contour_cfg=dict(z=dict(show=False))
+    if contour_interval is not None and contour_interval>0:
+        c_start=np.floor(zlo/contour_interval)*contour_interval*ve
+        c_end=np.ceil(zhi/contour_interval)*contour_interval*ve
+        contour_cfg=dict(z=dict(
+            show=True, start=c_start, end=c_end,
+            size=contour_interval*ve,
+            color="rgba(255,255,255,0.5)", width=1,
+            usecolormap=False,
+            highlightcolor="rgba(255,255,255,0.8)",
+            project_z=False,
+        ))
+
     fig=go.Figure(data=[go.Surface(
         z=zp, x=xm, y=ym,
         colorscale=cs, cmin=zlo*ve, cmax=zhi*ve,
@@ -302,18 +345,9 @@ def render_dtm(bundle,ve,cs):
             title=dict(text="Elevation (m)",font=dict(color="#ccc")),
             tickvals=tv*ve, ticktext=[f"{v:.0f}" for v in tv],
             tickfont=dict(color="#ccc"), thickness=14, len=.7),
-        # Hillshade via Plotly's built-in lighting — directional light from
-        # the northwest gives terrain definition without any manual gradient
-        # computation. Zero CPU cost, handled by WebGL.
-        lighting=dict(
-            ambient=0.35,
-            diffuse=0.7,
-            specular=0.15,
-            roughness=0.6,
-            fresnel=0.05,
-        ),
+        lighting=dict(ambient=0.35,diffuse=0.7,specular=0.15,roughness=0.6,fresnel=0.05),
         lightposition=dict(x=-500, y=500, z=2000),
-        # No hover tooltip — avoids NaN display issues entirely
+        contours=contour_cfg,
         hoverinfo="skip",
     )])
 
@@ -326,12 +360,13 @@ def render_dtm(bundle,ve,cs):
         margin=dict(l=0,r=0,t=0,b=0),paper_bgcolor=bg)
     st.plotly_chart(fig,use_container_width=True)
 
-    res=dm.get("src_resolution_m","—")
+    relief=zhi-zlo; res=dm.get("src_resolution_m","—")
     co=st.columns(4)
     co[0].metric("Min",f"{zlo:.1f} m"); co[1].metric("Max",f"{zhi:.1f} m")
-    co[2].metric("Relief",f"{zhi-zlo:.1f} m")
+    co[2].metric("Relief",f"{relief:.1f} m")
     co[3].metric("Res.",f"{res} m/px" if isinstance(res,(int,float)) else str(res))
-    st.caption(f"DTM · {nr}×{nc} · vert. exag. {ve:.1f}× · {cs} · hillshade lighting")
+    cstr=f" · contours: {contour_interval}m" if contour_interval else ""
+    st.caption(f"DTM · {nr}×{nc} · vert. exag. {ve:.1f}× · {cs} · hillshade{cstr}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
@@ -342,7 +377,8 @@ def main():
     if not check_password(): st.stop()
     render_header()
 
-    bundle=None;vis={};ps=2;ve=1.0;cs="Turbo";picked=PLACEHOLDER;pb=1_000_000;use_pot=False
+    bundle=None; vis={}; ps=2; ve=1.0; cs="Turbo"; picked=PLACEHOLDER
+    pb=1_000_000; use_pot=False; contour_int=None
 
     with st.sidebar:
         st.header("Survey")
@@ -363,24 +399,40 @@ def main():
                     r2p=st.secrets.get("r2_public_url","").strip()
                     use_pot=meta.get("potree_available",False) and bool(r2p)
 
+                    # ── Point cloud controls ──────────────────────────────
                     st.header("Point cloud")
                     if use_pot:
                         pb=st.select_slider("Point budget",
                             options=[500_000,1_000_000,2_000_000,3_000_000,5_000_000],
                             value=1_000_000,format_func=_fmt_n,
-                            help="Max points rendered at once. Lower = smoother navigation.")
+                            help="Max points rendered. Lower = smoother navigation.")
                     else:
                         ps=st.slider("Point size",1,6,2,help="Pixel size per point.")
                         for n in meta.get("layers",[]):
                             vis[n]=st.checkbox(_layer_label(n),value=True)
                         if not meta.get("potree_available"):
-                            st.caption("💡 Run PotreeConverter to enable full-res viewer.")
+                            st.caption("Run PotreeConverter to enable full-res viewer.")
 
+                    # ── Terrain model controls ────────────────────────────
                     if bundle["dtm"] is not None:
                         st.header("Terrain model")
-                        ve=st.slider("Vertical exag.",0.5,5.0,1.0,step=0.5,help="1.0 = true scale.")
+                        ve=st.slider("Vertical exag.",0.5,5.0,1.0,step=0.5,
+                                     help="1.0 = true scale.")
                         cs=st.selectbox("Colorscale",DTM_CS,index=0)
 
+                        # Contour interval — filtered by survey relief
+                        dtm_data=bundle["dtm"]; fm_s=np.isfinite(dtm_data)
+                        if fm_s.any():
+                            relief=float(np.max(dtm_data[fm_s])-np.min(dtm_data[fm_s]))
+                            int_opts=_contour_options(relief)
+                            labels=["Off"]+[f"{i}m" for i in int_opts]
+                            choice=st.selectbox("Contours",labels,index=0,
+                                help=f"Elevation contour lines on the surface. "
+                                     f"Survey relief: {relief:.0f}m.")
+                            if choice!="Off":
+                                contour_int=int(choice.replace("m",""))
+
+                    # ── Info ──────────────────────────────────────────────
                     st.header("Info")
                     vm="Potree (full)" if use_pot else "PyDeck (sampled)"
                     st.markdown(f"**Viewer:** {vm}  \n**Mode:** {meta['mode'].capitalize()}  \n"
@@ -388,6 +440,7 @@ def main():
                                 f"**CRS:** {meta.get('crs_source','—')}  \n"
                                 f"**DTM:** {'Yes' if meta.get('dtm_available') else 'No'}")
 
+                    # ── Downloads ─────────────────────────────────────────
                     st.header("Downloads")
                     rlk=meta.get("raw_las_key"); rdk=meta.get("raw_dtm_key")
                     if rlk:
@@ -398,17 +451,21 @@ def main():
                         try: st.link_button("⬇ Terrain GeoTIFF",presigned_url(rdk,ttl=900),
                                             use_container_width=True)
                         except: st.caption("DTM unavailable")
-                    if not rlk and not rdk: st.caption("Re-run preprocessing for downloads.")
+                    if not rlk and not rdk:
+                        st.caption("Re-run preprocessing for downloads.")
+
             if st.button("⟳ Refresh surveys"): refresh_surveys();st.rerun()
 
+    # ── Main area: empty state ────────────────────────────────────────────
     if picked==PLACEHOLDER or bundle is None:
         st.markdown("""<div class="wingtra-card"><div class="wingtra-card-title">Select a survey</div>
           <p>Pick a dataset from the sidebar.</p><ul>
           <li>Full LIDAR via Potree — streaming, 131M+ points</li>
-          <li>Terrain model with hillshade lighting and vertical exaggeration</li>
+          <li>Terrain model with hillshade, contours, and vertical exaggeration</li>
           <li>Download raw LAS and GeoTIFF</li></ul></div>""",unsafe_allow_html=True)
         st.stop()
 
+    # ── Tabs ──────────────────────────────────────────────────────────────
     tabs_l=["☁ Point Cloud"]
     if bundle["dtm"] is not None: tabs_l.append("⛰ Terrain Model")
     tabs=st.tabs(tabs_l)
@@ -416,6 +473,6 @@ def main():
         if use_pot: render_potree_viewer(bundle,pb)
         else: render_point_cloud(bundle,vis,ps)
     if len(tabs)>1:
-        with tabs[1]: render_dtm(bundle,ve,cs)
+        with tabs[1]: render_dtm(bundle,ve,cs,contour_int)
 
 if __name__=="__main__": main()
