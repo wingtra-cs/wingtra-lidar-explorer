@@ -2,7 +2,7 @@
 LIDAR Survey Explorer
 """
 
-import os, hmac, base64, json
+import os, hmac, base64, json, io, zipfile
 import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
@@ -116,9 +116,9 @@ def _contour_options(relief):
 
 def _extract_contour_segments(cs):
     """Extract segments from matplotlib QuadContourSet across versions.
-    Handles API changes: collections (< 3.8), allsegs (3.0-3.9), _paths (3.10+)."""
+    Returns dict {level_value: [array_of_coords, ...]}"""
     result = {}
-    # Try allsegs first (works 3.0 through 3.9)
+    # allsegs (works 3.0 through 3.9)
     try:
         all_segs = cs.allsegs
         for i, level in enumerate(cs.levels):
@@ -126,14 +126,14 @@ def _extract_contour_segments(cs):
         return result
     except (AttributeError, TypeError):
         pass
-    # Try collections (< 3.8)
+    # collections (< 3.8)
     try:
         for i, level in enumerate(cs.levels):
             result[float(level)] = [p.vertices for p in cs.collections[i].get_paths()]
         return result
     except (AttributeError, TypeError):
         pass
-    # Internal _paths (3.10+)
+    # _paths (3.10+)
     _paths = getattr(cs, '_paths', None)
     if _paths:
         for i, level in enumerate(cs.levels):
@@ -143,11 +143,14 @@ def _extract_contour_segments(cs):
     return result
 
 
-def _compute_contour_geojson(dtm, dtm_meta, interval):
-    """Compute contour lines from DTM. Returns GeoJSON string (EPSG:4326)."""
+def _compute_contour_shapefile(dtm, dtm_meta, interval):
+    """Compute contour lines from DTM. Returns (zip_bytes, n_contours).
+    The zip contains .shp, .shx, .dbf, .prj (EPSG:4326).
+    Requires matplotlib + pyshp."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import shapefile
 
     fm = np.isfinite(dtm)
     zlo, zhi = float(np.min(dtm[fm])), float(np.max(dtm[fm]))
@@ -167,19 +170,44 @@ def _compute_contour_geojson(dtm, dtm_meta, interval):
 
     segments_by_level = _extract_contour_segments(cs)
 
-    features = []
+    # Build shapefile in memory using pyshp
+    shp_buf = io.BytesIO()
+    shx_buf = io.BytesIO()
+    dbf_buf = io.BytesIO()
+
+    w = shapefile.Writer(shp=shp_buf, shx=shx_buf, dbf=dbf_buf)
+    w.field("ELEV_M", "N", decimal=1)
+    w.field("INTERVAL", "N", decimal=0)
+
+    n_contours = 0
     for level, segs in segments_by_level.items():
         for seg in segs:
-            if len(seg) < 2: continue
-            coords = [[round(float(x),7), round(float(y),7)] for x, y in seg]
-            features.append({"type":"Feature",
-                "properties":{"elevation_m":round(level,1)},
-                "geometry":{"type":"LineString","coordinates":coords}})
+            if len(seg) < 2:
+                continue
+            coords = [[round(float(x), 7), round(float(y), 7)] for x, y in seg]
+            w.line([coords])
+            w.record(ELEV_M=round(level, 1), INTERVAL=interval)
+            n_contours += 1
 
-    return json.dumps({"type":"FeatureCollection",
-        "properties":{"interval_m":interval,"crs":"EPSG:4326",
-                       "source":"LIDAR Survey Explorer","n_contours":len(features)},
-        "features":features})
+    w.close()
+
+    # WGS84 .prj
+    prj = ('GEOGCS["GCS_WGS_1984",'
+           'DATUM["D_WGS_1984",'
+           'SPHEROID["WGS_1984",6378137.0,298.257223563]],'
+           'PRIMEM["Greenwich",0.0],'
+           'UNIT["Degree",0.0174532925199433]]')
+
+    # Zip all four files
+    basename = f"contours_{interval}m"
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{basename}.shp", shp_buf.getvalue())
+        zf.writestr(f"{basename}.shx", shx_buf.getvalue())
+        zf.writestr(f"{basename}.dbf", dbf_buf.getvalue())
+        zf.writestr(f"{basename}.prj", prj)
+
+    return zip_buf.getvalue(), n_contours
 
 
 # =========================================================================== #
@@ -309,7 +337,7 @@ def render_point_cloud(bundle,visible_layers,point_size):
 
 
 # =========================================================================== #
-#  DTM — hillshade + contours (visual + downloadable GeoJSON)
+#  DTM — hillshade + contours (visual + downloadable shapefile)
 # =========================================================================== #
 DTM_CS=["Turbo","Viridis","Plasma","Inferno","Earth","RdYlBu"]
 
@@ -367,28 +395,33 @@ def render_dtm(bundle, ve, cs):
     cstr=f" · contours: {contour_int}m" if contour_int else ""
     st.caption(f"DTM · {nr}x{nc} · vert. exag. {ve:.1f}x · {cs} · hillshade{cstr}")
 
-    # Contour download
+    # Contour download — shapefile (.shp/.shx/.dbf/.prj in a zip)
     if contour_int is not None:
         slug=dm.get("slug",bundle["meta"].get("slug",""))
         if (st.session_state.get("prep_contour_int")!=contour_int
                 or st.session_state.get("prep_contour_slug")!=slug):
-            st.session_state.pop("prep_contour_json",None)
+            st.session_state.pop("prep_contour_zip",None)
             st.session_state.pop("prep_contour_int",None)
             st.session_state.pop("prep_contour_slug",None)
-        prepared=st.session_state.get("prep_contour_json")
+            st.session_state.pop("prep_contour_n",None)
+        prepared=st.session_state.get("prep_contour_zip")
         if prepared:
-            n_feat=json.loads(prepared).get("properties",{}).get("n_contours","?")
-            st.download_button(f"⬇  Download contours — {contour_int}m ({n_feat} lines)",
-                data=prepared,file_name=f"contours_{contour_int}m.geojson",
-                mime="application/json",use_container_width=True)
-            st.caption("Change interval above to regenerate.")
+            n_feat=st.session_state.get("prep_contour_n","?")
+            st.download_button(
+                f"⬇  Download contours — {contour_int}m ({n_feat} lines)",
+                data=prepared,
+                file_name=f"contours_{contour_int}m.zip",
+                mime="application/zip",
+                use_container_width=True)
+            st.caption("Shapefile (EPSG:4326). Change interval above to regenerate.")
         else:
             if st.button("Prepare contours for download",use_container_width=True):
                 with st.spinner(f"Computing {contour_int}m contours…"):
-                    gj=_compute_contour_geojson(dtm,dm,contour_int)
-                st.session_state["prep_contour_json"]=gj
+                    zip_bytes, n_c = _compute_contour_shapefile(dtm,dm,contour_int)
+                st.session_state["prep_contour_zip"]=zip_bytes
                 st.session_state["prep_contour_int"]=contour_int
                 st.session_state["prep_contour_slug"]=slug
+                st.session_state["prep_contour_n"]=n_c
                 st.rerun()
 
 
@@ -455,7 +488,7 @@ def main():
             '<p>Pick a dataset from the sidebar.</p><ul>'
             '<li>Full LIDAR via Potree — streaming, 131M+ points</li>'
             '<li>Terrain model with hillshade, contours, vertical exaggeration</li>'
-            '<li>Downloadable contour GeoJSON</li>'
+            '<li>Downloadable contour shapefile</li>'
             '<li>Download raw LAS and GeoTIFF</li></ul></div>',unsafe_allow_html=True)
         st.stop()
     tabs_l=["☁ Point Cloud"]
