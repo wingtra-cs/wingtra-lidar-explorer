@@ -1,160 +1,204 @@
-# LiDAR Survey Explorer
+# LIDAR Survey Explorer
 
-A Streamlit web app for visualising WingtraRay LiDAR surveys. Displays classified or unclassified point clouds via PyDeck and terrain surfaces (DTM) from LiDAR360 via Plotly. Survey bundles are stored in Cloudflare R2 and loaded on demand.
+Password-protected web app for visualising LIDAR survey data collected with WingtraOne. Built with Streamlit, Potree, and Plotly — deployed on Streamlit Community Cloud with survey data streamed from Cloudflare R2.
 
----
+## Features
 
-## Repo structure
+### Point Cloud Viewer (Potree)
+- **Full-resolution streaming** — 131M+ points rendered progressively via Potree's octree LOD system. No downsampling, no pre-loading the entire dataset.
+- **Elevation colouring** — rainbow gradient mapped to height (blue = low, red = high)
+- **Adaptive point sizing** — points scale automatically based on zoom level
+- **Adjustable point budget** — 500K to 5M points rendered simultaneously (sidebar slider)
+- **Black background** — clean presentation for ellipsoidal height data without basemap alignment issues
+
+#### Potree Navigation Controls
+
+| Action | Mouse | 
+|--------|-------|
+| **Rotate** | Left-click + drag |
+| **Pan** | Right-click + drag |
+| **Zoom** | Scroll wheel |
+| **Pan** (alt) | Middle-click + drag |
+
+### Digital Terrain Model
+- **3D surface** with hillshade lighting (directional light from northwest)
+- **Adjustable vertical exaggeration** — 0.5× to 5× (1× = true scale)
+- **Multiple colorscales** — Turbo, Viridis, Plasma, Inferno, Earth, RdYlBu
+- **Contour lines** — selectable intervals (1m, 2m, 5m, 10m, 20m), filtered by survey relief
+- **Contour export** — prepare and download contours as a shapefile (.shp/.shx/.dbf/.prj in a zip), georeferenced in EPSG:4326
+
+### Downloads
+- Raw LAS file (full resolution, via presigned URL from R2)
+- Raw DTM GeoTIFF (via presigned URL from R2)
+- Contour shapefile (generated on-demand at the selected interval)
+
+## Architecture
 
 ```
-wingtra-lidar-explorer/
-  lidar_app.py            Streamlit entry point
-  lidar_r2.py             R2 read-only access layer
-  requirements.txt        App runtime dependencies
-  .gitignore
-  assets/
-    wingtra_logo.png      Wingtra logo (copy from multispectral repo)
-  .streamlit/
-    secrets.toml          Credentials — NOT committed
-    config.toml           Optional theme overrides
-  tools/
-    lidar_preprocess.py   Local preprocessing pipeline (laptop → R2)
-    lidar_diagnose.py     One-shot diagnostic on a new LAS file
-    lidar_patch_meta.py   Patch meta.json after a manual rclone upload
+Browser
+  ├── Potree viewer (iframe, streams octree tiles from R2)
+  ├── Plotly 3D surface (DTM tab)
+  └── PyDeck fallback (surveys without Potree tiles)
+
+Streamlit Community Cloud
+  └── lidar_app.py (serves HTML, reads meta/parquet/npy from R2)
+
+Cloudflare R2 (public bucket)
+  └── lidar/<slug>/
+        ├── potree/
+        │     ├── metadata.json
+        │     ├── hierarchy.bin
+        │     └── octree.bin
+        ├── ground.parquet        (or points.parquet if unclassified)
+        ├── nonground.parquet
+        ├── dtm.npy
+        ├── dtm_meta.json
+        ├── raw/<slug>.las
+        ├── raw/<slug>_dtm.tif
+        └── meta.json             ← readiness gate
+
+  └── potree-assets/              (shared, one-time upload)
+        ├── potree.js
+        ├── potree.css
+        ├── libs/other/BinaryHeap.js
+        ├── lazylibs/
+        ├── resources/
+        └── workers/
 ```
 
----
+### Potree Integration Notes
 
-## Setup
+Potree runs inside a Streamlit `components.v1.html()` srcdoc iframe. This required several workarounds:
 
-### 1. Secrets
+- **Worker monkey-patch** — srcdoc iframes have an opaque `null` origin, so `new Worker(crossOriginURL)` silently fails. A patch detects the null origin and creates all Workers from Blob URLs instead, rewriting relative `importScripts()` paths to absolute R2 URLs.
+- **No `loadGUI()`** — Potree's `viewer.loadGUI()` tries to AJAX-load `sidebar.html` from R2, which hangs in the srcdoc context. Since we use the Streamlit sidebar for controls, `loadPointCloud()` is called directly (it's already on the namespace with all CDN dependencies loaded).
+- **`_awaitSize()`** — the Viewer is created only after the iframe container has non-zero pixel dimensions, preventing WebGL framebuffer errors.
+- **CDN dependencies** — THREE.js r124, jQuery, TWEEN, i18next, jstree, proj4, d3, spectrum are loaded from CDN before potree.js. BinaryHeap.js is loaded from R2.
 
-Create `.streamlit/secrets.toml` (never committed):
+## Repo Structure
+
+```
+lidar_app.py              ← Streamlit entry point
+lidar_r2.py               ← R2 read-only layer (list surveys, load bundles, presigned URLs)
+requirements.txt
+.gitignore
+README.md
+assets/
+  wingtra_logo.png
+.streamlit/
+  secrets.toml            ← NOT committed (local + Community Cloud Secrets)
+tools/
+  lidar_preprocess.py     ← full pipeline: LAS → parquet + DTM + Potree → R2
+  lidar_dtm_only.py       ← standalone DTM processor (add DTM to existing bundle)
+  lidar_patch_meta.py     ← patch meta.json fields on R2
+  lidar_diagnose.py       ← diagnostic tool for R2 bundle inspection
+```
+
+## Preprocessing
+
+### Full pipeline
+
+Edit configuration at the top of `tools/lidar_preprocess.py`:
+
+```python
+LAS_PATH          = r"C:\path\to\survey.las"
+DTM_TIF_PATH      = r"C:\path\to\dtm.tif"       # optional
+SLUG              = "my_survey"
+SURVEY_NAME       = "My Survey — Block 7"
+POTREE_CONVERTER  = r"C:\tools\PotreeConverter\PotreeConverter.exe"
+```
+
+Run:
+```
+python tools/lidar_preprocess.py
+```
+
+Steps:
+1. Inspect LAS (CRS, classification codes)
+2. Reproject to WGS84 + reservoir-sample for PyDeck fallback
+3. Build parquet layers (ground/nonground or all points)
+4. Package DTM (decimate to 800px max, nearest resampling)
+5. Upload raw LAS + DTM GeoTIFF to R2
+6. Run PotreeConverter → upload octree tiles to R2
+7. Upload processed bundle + meta.json (last — readiness gate)
+
+### Add DTM to existing bundle
+
+If the full pipeline was run without a DTM path:
+
+```
+python tools/lidar_dtm_only.py
+```
+
+### PotreeConverter
+
+Download from [PotreeConverter releases](https://github.com/potree/PotreeConverter/releases). No install — standalone executable. Built into the preprocessing pipeline (Step 6), or run manually:
+
+```
+PotreeConverter.exe input.las -o output_folder
+```
+
+## Secrets
+
+`.streamlit/secrets.toml` (local) and Streamlit Community Cloud Secrets:
 
 ```toml
+app_password  = "your_password"
+r2_public_url = "https://pub-<hash>.r2.dev"
+
 [r2]
-account_id = "..."       # Cloudflare R2 account ID
-access_key = "..."       # READ-ONLY token  ← used by the app
+account_id = "..."
+access_key = "..."    # read-only token
 secret_key = "..."
 bucket     = "ptpn-bucket"
 
-[r2_write]
-access_key = "..."       # READ & WRITE token  ← used only by tools/
+[r2_write]            # local only — NOT on Community Cloud
+access_key = "..."
 secret_key = "..."
 ```
 
-### 2. Logo
+## R2 Bucket Setup
 
-Copy `wingtra_logo.png` from the multispectral repo into `assets/`.
+- **Public access** enabled via Cloudflare R2 development URL (`pub-<hash>.r2.dev`)
+- **CORS policy** must allow all origins (srcdoc iframes send `Origin: null`):
 
-### 3. Local install
-
-```bash
-pip install streamlit pydeck plotly numpy pandas pyarrow boto3
-
-# Additional packages for the tools/ scripts:
-pip install laspy pyproj rasterio scipy
-# Python < 3.11 also needs: pip install tomli
+```json
+[
+  {
+    "AllowedOrigins": ["*"],
+    "AllowedMethods": ["GET", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "MaxAgeSeconds": 3600
+  }
+]
 ```
 
----
-
-## Running locally
-
-```bash
-streamlit run lidar_app.py
-```
-
----
-
-## Deploying to Streamlit Community Cloud
-
-1. Push the repo to GitHub (secrets.toml is gitignored).
-2. Connect the repo in the Streamlit Community Cloud dashboard.
-3. Set entry point to `lidar_app.py`.
-4. Add secrets via the dashboard "Secrets" box (same TOML format as above).
-5. Deploy.
-
-After the first successful build, freeze exact dependency versions from the build log and replace `>=` bounds in `requirements.txt` with `~=` pinned versions.
-
----
-
-## Preprocessing workflow
-
-For each new survey:
-
-**1. Inspect the LAS file**
-```bash
-python tools/lidar_diagnose.py /path/to/survey.las
-```
-Confirms CRS and classification codes before running the full pipeline.
-
-**2. Edit tools/lidar_preprocess.py**
-Set the config block at the top:
-```python
-LAS_PATH     = r"C:\...\survey.las"
-DTM_TIF_PATH = r"C:\...\dtm_from_lidar360.tif"   # leave blank if unavailable
-SLUG         = "client_block_date"                 # unique identifier
-SURVEY_NAME  = "Client — Block X — DD Mon YYYY"   # display name in the app
-```
-
-**3. Run**
-```bash
-python tools/lidar_preprocess.py
-```
-This reads, reprojects (UTM → WGS84), reservoir-samples to ~300K display points per layer, packages the DTM, uploads everything to R2, and writes `meta.json` last as a readiness flag.
-
-**4. Refresh the app**
-Click "⟳ Refresh surveys" in the sidebar.
-
----
-
-## Classification modes
-
-The preprocessing script auto-detects which mode to use:
-
-| LAS content | Mode | R2 files |
-|---|---|---|
-| All code 0 (unclassified) | `unclassified` | `points.parquet` |
-| Ground (code 2) present | `classified` | `ground.parquet` + `nonground.parquet` |
-
-No self-classification is performed. For classified output, run ground classification in LiDAR360 first, then re-run the preprocessing script.
-
----
-
-## R2 bundle structure
+## Requirements
 
 ```
-lidar/<slug>/
-  points.parquet          unclassified mode
-  ground.parquet          classified mode
-  nonground.parquet       classified mode
-  dtm.npy                 decimated elevation grid (float32, H×W)
-  dtm_meta.json           bounds, z range, grid shape, source resolution
-  raw/<slug>.las          raw LAS (presigned download)
-  raw/<slug>_dtm.tif      raw DTM GeoTIFF (presigned download)
-  meta.json               readiness flag — written last by preprocess script
+streamlit
+pydeck
+plotly
+pandas
+numpy
+boto3
+pyarrow
+pyshp
+matplotlib
 ```
 
----
+## Deployment
 
-## Patching an existing bundle
+Hosted on [Streamlit Community Cloud](https://streamlit.io/cloud). Push to `main` branch triggers automatic redeploy. Apps sleep after 12 hours of inactivity — use a GitHub Actions cron job to keep alive:
 
-If raw files were uploaded manually with rclone after preprocessing:
-
-```bash
-# Upload with standardised names
-rclone copyto survey.las "r2:ptpn-bucket/lidar/<slug>/raw/<slug>.las" --progress --s3-no-check-bucket
-rclone copyto DTM.tif    "r2:ptpn-bucket/lidar/<slug>/raw/<slug>_dtm.tif" --progress --s3-no-check-bucket
-
-# Patch meta.json to add the download keys
-python tools/lidar_patch_meta.py
+```yaml
+name: Keep alive
+on:
+  schedule:
+    - cron: '0 */8 * * *'
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -sL -o /dev/null https://your-app.streamlit.app/ || true
 ```
-
----
-
-## Notes
-
-- The app uses `map_provider=None` in PyDeck — dark background, no Mapbox token required. Satellite background can be added later with a Mapbox token in secrets.
-- DTM surface axes are in metres from the survey centre so horizontal and vertical dimensions are proportionally correct.
-- Presigned download URLs expire after 15 minutes. Clicking the download button generates a fresh URL each time.
